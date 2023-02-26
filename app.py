@@ -9,6 +9,10 @@ from aws_cdk import (
     aws_iam as iam,
     aws_secretsmanager as sm,
     aws_ecs_patterns as ecs_patterns,
+    aws_certificatemanager as acm,
+    aws_elasticloadbalancingv2 as elbv2,
+    aws_elasticloadbalancingv2_targets as elbv2_targets,
+    aws_route53 as route53,
     App,
     Stack,
     CfnParameter,
@@ -16,9 +20,10 @@ from aws_cdk import (
     Aws,
     RemovalPolicy,
     Duration,
+    Environment,
 )
 from constructs import Construct
-
+import os
 
 class MLflowStack(Stack):
     def __init__(self, scope: Construct, id: str, **kwargs) -> None:
@@ -34,6 +39,7 @@ class MLflowStack(Stack):
         container_repo_name = "mlflow-containers"
         cluster_name = "mlflow"
         service_name = "mlflow"
+        domain_name = os.environ["MLFLOW_DOMAIN_NAME"]
 
         # ==================================================
         # ================= IAM ROLE =======================
@@ -131,6 +137,7 @@ class MLflowStack(Stack):
             removal_policy=RemovalPolicy.DESTROY,
             deletion_protection=False,
         )
+
         # ==================================================
         # =============== FARGATE SERVICE ==================
         # ==================================================
@@ -146,8 +153,20 @@ class MLflowStack(Stack):
             memory_limit_mib=8 * 1024,
         )
 
+        nginx_container = task_definition.add_container(
+            id="NginxContainer",
+            image=ecs.ContainerImage.from_asset(directory="proxy"),
+            environment={
+                "PROXY_UPSTREAM_NAME": "localhost",
+                "PROXY_UPSTREAM_URL": "http://localhost:5000"
+            },
+        )
+        nginx_container.add_port_mappings(
+            ecs.PortMapping(container_port=80, host_port=80)
+        )
+
         container = task_definition.add_container(
-            id="Container",
+            id="MLflowContainer",
             image=ecs.ContainerImage.from_asset(directory="container"),
             environment={
                 "BUCKET": f"s3://{artifact_bucket.bucket_name}",
@@ -164,20 +183,45 @@ class MLflowStack(Stack):
         )
         container.add_port_mappings(port_mapping)
 
-        fargate_service = ecs_patterns.NetworkLoadBalancedFargateService(
-            scope=self,
-            id="MLFLOW",
-            service_name=service_name,
-            cluster=cluster,
-            task_definition=task_definition,
-        )
+        # ==================================================
+        # ===============  HTTPS Support  ==================
+        # ==================================================
 
+        # Create a load balancer
+        lb = elbv2.ApplicationLoadBalancer(self, 'MyLoadBalancer', vpc=vpc, internet_facing=True)
+
+        # Create a certificate for HTTPS support
+        certificate = acm.Certificate(self, "MLFLOW_Certificate", domain_name=domain_name)
+
+        # Add a listener with HTTPS support
+        listener = lb.add_listener('HttpsListener', port=443, certificates=[certificate])
+
+        # Create a Fargate service with an application load balancer
+        fargate_service = ecs_patterns.ApplicationLoadBalancedFargateService(self, 'MyFargateService',
+                                                                             cluster=cluster,
+                                                                             task_definition=task_definition,
+                                                                             listener_port=80,
+                                                                             load_balancer=lb)
         # Setup security group
         fargate_service.service.connections.security_groups[0].add_ingress_rule(
             peer=ec2.Peer.ipv4(vpc.vpc_cidr_block),
-            connection=ec2.Port.tcp(5000),
-            description="Allow inbound from VPC for mlflow",
+            connection=ec2.Port.tcp(80),
+            description="Allow inbound https tcp traffic for mlflow proxy",
         )
+
+        # Create a hosted zone in Route 53 for the domain name
+        hosted_zone = route53.PublicHostedZone.from_lookup(self, "HostedZone", domain_name=domain_name)
+
+        # Create an A record alias that maps the domain name to the Fargate load balancer's DNS name
+        alias_target = route53.RecordTarget.from_values(fargate_service.load_balancer.load_balancer_dns_name)
+        route53.ARecord(self, "AliasRecord",
+                        zone=hosted_zone,
+                        record_name=f"{domain_name}.",
+                        target=alias_target)
+
+        # Register the Fargate service with the HTTPS listener
+        listener.add_targets('HttpsTargetGroup', port=80,
+                              targets=[elbv2_targets.IpTarget(fargate_service.load_balancer.load_balancer_dns_name)])
 
         # Setup autoscaling policy
         scaling = fargate_service.service.auto_scale_task_count(max_capacity=2)
@@ -195,8 +239,15 @@ class MLflowStack(Stack):
             id="LoadBalancerDNS",
             value=fargate_service.load_balancer.load_balancer_dns_name,
         )
-
+        CfnOutput(
+            scope=self,
+            id="LoadBalancerNameServers",
+            value=str(hosted_zone.hosted_zone_name_servers),
+            description=f"NameServers used for {domain_name}"
+        )
 
 app = App()
-MLflowStack(app, "MLflowStack")
+MLflowStack(app, "MLflowStack", env=Environment(
+    account=os.environ["CDK_DEFAULT_ACCOUNT"],
+    region=os.environ["CDK_DEFAULT_REGION"]))
 app.synth()
