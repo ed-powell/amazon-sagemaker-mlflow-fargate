@@ -191,10 +191,10 @@ class MLflowStack(Stack):
         lb = elbv2.ApplicationLoadBalancer(self, 'MyLoadBalancer', vpc=vpc, internet_facing=True)
 
         # Create a certificate for HTTPS support
-        certificate = acm.Certificate(self, "MLFLOW_Certificate", domain_name=domain_name)
+        #certificate = acm.Certificate(self, "MLFLOW_Certificate", domain_name=domain_name)
 
         # Add a listener with HTTPS support
-        listener = lb.add_listener('HttpsListener', port=443, certificates=[certificate])
+        #listener = lb.add_listener('HttpsListener', port=443, certificates=[certificate])
 
         # Create a Fargate service with an application load balancer
         fargate_service = ecs_patterns.ApplicationLoadBalancedFargateService(self, 'MyFargateService',
@@ -209,20 +209,6 @@ class MLflowStack(Stack):
             description="Allow inbound https tcp traffic for mlflow proxy",
         )
 
-        # Create a hosted zone in Route 53 for the domain name
-        hosted_zone = route53.PublicHostedZone.from_lookup(self, "HostedZone", domain_name=domain_name)
-
-        # Create an A record alias that maps the domain name to the Fargate load balancer's DNS name
-        alias_target = route53.RecordTarget.from_values(fargate_service.load_balancer.load_balancer_dns_name)
-        route53.ARecord(self, "AliasRecord",
-                        zone=hosted_zone,
-                        record_name=f"{domain_name}.",
-                        target=alias_target)
-
-        # Register the Fargate service with the HTTPS listener
-        listener.add_targets('HttpsTargetGroup', port=80,
-                              targets=[elbv2_targets.IpTarget(fargate_service.load_balancer.load_balancer_dns_name)])
-
         # Setup autoscaling policy
         scaling = fargate_service.service.auto_scale_task_count(max_capacity=2)
         scaling.scale_on_cpu_utilization(
@@ -231,6 +217,21 @@ class MLflowStack(Stack):
             scale_in_cooldown=Duration.seconds(60),
             scale_out_cooldown=Duration.seconds(60),
         )
+
+        # Create a hosted zone in Route 53 for the domain name
+        #hosted_zone = route53.PublicHostedZone(self, "MLFlowPublicHostedZone", zone_name="mlflow.deepmm.com")
+
+        # Create an A record alias that maps the domain name to the Fargate load balancer's DNS name
+        #alias_target = route53.RecordTarget.from_values(fargate_service.load_balancer.load_balancer_dns_name)
+        #route53.ARecord(self, "AliasRecord",
+        #                zone=hosted_zone,
+        #                record_name=f"{domain_name}.",
+        #                target=alias_target)
+
+        # Register the Fargate service with the HTTPS listener
+        #listener.add_targets('HttpsTargetGroup', port=80,
+        #                      targets=[elbv2_targets.IpTarget(fargate_service.load_balancer.load_balancer_dns_name)])
+
         # ==================================================
         # =================== OUTPUTS ======================
         # ==================================================
@@ -239,12 +240,12 @@ class MLflowStack(Stack):
             id="LoadBalancerDNS",
             value=fargate_service.load_balancer.load_balancer_dns_name,
         )
-        CfnOutput(
-            scope=self,
-            id="LoadBalancerNameServers",
-            value=str(hosted_zone.hosted_zone_name_servers),
-            description=f"NameServers used for {domain_name}"
-        )
+        #CfnOutput(
+        #    scope=self,
+        #    id="LoadBalancerNameServers",
+        #    value=str(hosted_zone.hosted_zone_name_servers),
+        #    description=f"NameServers used for {domain_name}"
+        #)
 
 app = App()
 MLflowStack(app, "MLflowStack", env=Environment(
