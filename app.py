@@ -42,6 +42,7 @@ class MLflowStack(Stack):
         cluster_name = "mlflow"
         service_name = "mlflow"
         domain_name = os.environ["MLFLOW_DOMAIN_NAME"]
+        certificate_arn = os.environ.get("MLFLOW_CERTIFICATE_ARN")
 
         # ==================================================
         # ================= IAM ROLE =======================
@@ -216,8 +217,28 @@ class MLflowStack(Stack):
             scale_out_cooldown=Duration.seconds(60),
         )
 
-        # Create a certificate for HTTPS support
-        certificate = acm.Certificate(self, "MLFLOW_Certificate", domain_name=domain_name)
+        # Create a hosted zone in Route 53 for the domain name
+        hosted_zone = route53.PublicHostedZone(self, "MLFlowPublicHostedZone", zone_name=domain_name)
+
+        # Create an A record alias that maps the domain name to the Fargate load balancer's DNS name
+        route53.ARecord(self, "AliasRecord",
+                        zone=hosted_zone,
+                        record_name=f"{domain_name}.",
+                        target=route53.RecordTarget.from_alias(alias_target=route53_targets.LoadBalancerTarget(lb)),
+                        ttl=Duration.seconds(300))
+
+        # Create a certificate for HTTPS support, or use existing one specified as arn
+        if certificate_arn:
+            certificate = acm.Certificate.from_certificate_arn(self,
+                "MLFLOW_Certificate",
+                certificate_arn
+            )
+        else:
+            certificate = acm.Certificate(self,
+                "MLFLOW_Certificate",
+                domain_name=domain_name,
+                validation=acm.CertificateValidation.from_dns(hosted_zone)
+            )
 
         # Create a target group for the Fargate service
         target_group = elbv2.ApplicationTargetGroup(
@@ -241,16 +262,6 @@ class MLflowStack(Stack):
             certificates=[certificate],
             default_target_groups=[target_group]
          )
-
-        # Create a hosted zone in Route 53 for the domain name
-        hosted_zone = route53.PublicHostedZone(self, "MLFlowPublicHostedZone", zone_name=domain_name)
-
-        # Create an A record alias that maps the domain name to the Fargate load balancer's DNS name
-        route53.ARecord(self, "AliasRecord",
-                        zone=hosted_zone,
-                        record_name=f"{domain_name}.",
-                        target=route53.RecordTarget.from_alias(alias_target=route53_targets.LoadBalancerTarget(lb)),
-                        ttl=Duration.seconds(300))
 
         # ==================================================
         # =================== OUTPUTS ======================
