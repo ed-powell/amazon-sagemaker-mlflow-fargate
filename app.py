@@ -165,7 +165,7 @@ class MLflowStack(Stack):
             },
         )
         nginx_container.add_port_mappings(
-            ecs.PortMapping(container_port=80, host_port=80)
+            ecs.PortMapping(container_port=8080, host_port=8080)
         )
 
         container = task_definition.add_container(
@@ -198,7 +198,7 @@ class MLflowStack(Stack):
                                                                              cluster=cluster,
                                                                              service_name=service_name,
                                                                              task_definition=task_definition,
-                                                                             listener_port=80,
+                                                                             listener_port=8080,
                                                                              load_balancer=lb
         )
         # Setup security group
@@ -245,7 +245,7 @@ class MLflowStack(Stack):
             self,
             "MyTargetGroup",
             vpc=vpc,
-            port=80,
+            port=8080,
             targets=[fargate_service.service],
             protocol=elbv2.ApplicationProtocol.HTTP,
             health_check=elbv2.HealthCheck(
