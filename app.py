@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: MIT-0
 
 import os
+import json
 
 from aws_cdk import (
     aws_ec2 as ec2,
@@ -69,6 +70,17 @@ class MLflowStack(Stack):
             generate_secret_string=sm.SecretStringGenerator(
                 password_length=20, exclude_punctuation=True
             ),
+        )
+
+        sm.Secret(
+            scope=self,
+            id="MLFSECRET",
+            secret_name="MLflow_Login",
+            generate_secret_string=sm.SecretStringGenerator(
+                password_length=20, exclude_punctuation=True,
+                secret_string_template=json.dumps({"Username": "mlflow-user"}),
+                generate_string_key='Password'
+            )
         )
 
         # ==================================================
