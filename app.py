@@ -34,6 +34,10 @@ class MLflowStack(Stack):
         container_repo_name = "mlflow-containers"
         cluster_name = "mlflow"
         service_name = "mlflow"
+        domain_name = os.environ["MLFLOW_DOMAIN_NAME"]
+        certificate_arn = os.environ.get("MLFLOW_CERTIFICATE_ARN")
+        mlf_username = os.environ["MLFLOW_USERNAME"]
+        mlf_password = os.environ["MLFLOW_PASSWORD"]
 
         # ==================================================
         # ================= IAM ROLE =======================
@@ -146,6 +150,21 @@ class MLflowStack(Stack):
             memory_limit_mib=8 * 1024,
         )
 
+        nginx_container = task_definition.add_container(
+            id="NginxContainer",
+            image=ecs.ContainerImage.from_asset(directory="proxy"),
+            build_args={"MLF_USERNAME": mlf_username, "MLF_PASSWORD": mlf_password},
+            environment={
+                "PROXY_UPSTREAM_NAME": "localhost",
+                "PROXY_UPSTREAM_URL": "http://localhost:5000"
+            },
+            logging = ecs.LogDriver.aws_logs(stream_prefix="nginx")
+        )
+        nginx_container.add_port_mappings(
+            ecs.PortMapping(container_port=8080, host_port=8080)
+        )
+
+
         container = task_definition.add_container(
             id="Container",
             image=ecs.ContainerImage.from_asset(directory="container"),
@@ -175,7 +194,7 @@ class MLflowStack(Stack):
         # Setup security group
         fargate_service.service.connections.security_groups[0].add_ingress_rule(
             peer=ec2.Peer.ipv4(vpc.vpc_cidr_block),
-            connection=ec2.Port.tcp(5000),
+            connection=ec2.Port.tcp(8080),
             description="Allow inbound from VPC for mlflow",
         )
 
