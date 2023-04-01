@@ -1,6 +1,6 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: MIT-0
-
+import os
 from aws_cdk import (
     aws_ec2 as ec2,
     aws_s3 as s3,
@@ -18,7 +18,6 @@ from aws_cdk import (
     Duration,
 )
 from constructs import Construct
-
 
 class MLflowStack(Stack):
     def __init__(self, scope: Construct, id: str, **kwargs) -> None:
@@ -144,7 +143,7 @@ class MLflowStack(Stack):
 
         task_definition = ecs.FargateTaskDefinition(
             scope=self,
-            id="MLflow",
+            id="MLflowTask",
             task_role=role,
             cpu=4 * 1024,
             memory_limit_mib=8 * 1024,
@@ -152,8 +151,9 @@ class MLflowStack(Stack):
 
         nginx_container = task_definition.add_container(
             id="NginxContainer",
-            image=ecs.ContainerImage.from_asset(directory="proxy"),
-            build_args={"MLF_USERNAME": mlf_username, "MLF_PASSWORD": mlf_password},
+            image=ecs.ContainerImage.from_asset(directory="proxy",
+                build_args={"MLF_USERNAME": mlf_username, "MLF_PASSWORD": mlf_password}
+            ),
             environment={
                 "PROXY_UPSTREAM_NAME": "localhost",
                 "PROXY_UPSTREAM_URL": "http://localhost:5000"
@@ -164,9 +164,8 @@ class MLflowStack(Stack):
             ecs.PortMapping(container_port=8080, host_port=8080)
         )
 
-
         container = task_definition.add_container(
-            id="Container",
+            id="MLflowContainer",
             image=ecs.ContainerImage.from_asset(directory="container"),
             environment={
                 "BUCKET": f"s3://{artifact_bucket.bucket_name}",
@@ -189,6 +188,7 @@ class MLflowStack(Stack):
             service_name=service_name,
             cluster=cluster,
             task_definition=task_definition,
+            listener_port=8080
         )
 
         # Setup security group
