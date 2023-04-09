@@ -9,6 +9,7 @@ from aws_cdk import (
     aws_iam as iam,
     aws_secretsmanager as sm,
     aws_ecs_patterns as ecs_patterns,
+    aws_servicediscovery as cloudmap,
     App,
     Stack,
     CfnParameter,
@@ -140,6 +141,9 @@ class MLflowStack(Stack):
         cluster = ecs.Cluster(
             scope=self, id="CLUSTER", cluster_name=cluster_name, vpc=vpc
         )
+        cluster.add_default_cloud_map_namespace(
+            name="local"
+        )
 
         task_definition = ecs.FargateTaskDefinition(
             scope=self,
@@ -154,10 +158,6 @@ class MLflowStack(Stack):
             image=ecs.ContainerImage.from_asset(directory="proxy",
                 build_args={"MLF_USERNAME": mlf_username, "MLF_PASSWORD": mlf_password}
             ),
-            environment={
-                "PROXY_UPSTREAM_NAME": "localhost",
-                "PROXY_UPSTREAM_URL": "http://localhost:5000"
-            },
             logging = ecs.LogDriver.aws_logs(stream_prefix="nginx")
         )
         nginx_container.add_port_mappings(
@@ -166,6 +166,7 @@ class MLflowStack(Stack):
 
         container = task_definition.add_container(
             id="MLflowContainer",
+            container_name="mlflow-server",
             image=ecs.ContainerImage.from_asset(directory="container"),
             environment={
                 "BUCKET": f"s3://{artifact_bucket.bucket_name}",
@@ -178,7 +179,7 @@ class MLflowStack(Stack):
             logging=ecs.LogDriver.aws_logs(stream_prefix="mlflow"),
         )
         port_mapping = ecs.PortMapping(
-            container_port=5000, host_port=5000, protocol=ecs.Protocol.TCP
+            container_port=80, host_port=80, protocol=ecs.Protocol.TCP
         )
         container.add_port_mappings(port_mapping)
 
@@ -188,6 +189,11 @@ class MLflowStack(Stack):
             service_name=service_name,
             cluster=cluster,
             task_definition=task_definition,
+            cloud_map_options=ecs.CloudMapOptions(
+                container=container,
+                container_port=80,
+                dns_record_type=cloudmap.DnsRecordType.A
+            ),
             listener_port=8080
         )
 
