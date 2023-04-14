@@ -32,8 +32,9 @@ class MLflowStack(Stack):
         username = "master"
         bucket_name = f"{project_name_param.value_as_string}-artifacts-{Aws.ACCOUNT_ID}"
         container_repo_name = "mlflow-containers"
-        cluster_name = "mlflow"
-        service_name = "mlflow"
+        cluster_name = "mlflow-cluster"
+        service_name = "mlflow-service"
+        UseNginx = False
         domain_name = os.environ["MLFLOW_DOMAIN_NAME"]
         certificate_arn = os.environ.get("MLFLOW_CERTIFICATE_ARN")
         mlf_username = os.environ["MLFLOW_USERNAME"]
@@ -52,6 +53,9 @@ class MLflowStack(Stack):
         )
         role.add_managed_policy(
             iam.ManagedPolicy.from_aws_managed_policy_name("AmazonECS_FullAccess")
+        )
+        role.add_managed_policy(
+            iam.ManagedPolicy.from_aws_managed_policy_name("AWSCloudMapFullAccess")
         )
 
         # ==================================================
@@ -152,17 +156,20 @@ class MLflowStack(Stack):
             cpu=4 * 1024,
             memory_limit_mib=8 * 1024,
         )
-
-        nginx_container = task_definition.add_container(
-            id="NginxContainer",
-            image=ecs.ContainerImage.from_asset(directory="proxy",
-                build_args={"MLF_USERNAME": mlf_username, "MLF_PASSWORD": mlf_password}
-            ),
-            logging = ecs.LogDriver.aws_logs(stream_prefix="nginx")
-        )
-        nginx_container.add_port_mappings(
-            ecs.PortMapping(container_port=8080, host_port=8080)
-        )
+        if UseNginx:
+            listener_port=8080
+            nginx_container = task_definition.add_container(
+                id="NginxContainer",
+                image=ecs.ContainerImage.from_asset(directory="proxy",
+                    build_args={"MLF_USERNAME": mlf_username, "MLF_PASSWORD": mlf_password}
+                ),
+                logging = ecs.LogDriver.aws_logs(stream_prefix="nginx")
+            )
+            nginx_container.add_port_mappings(
+                ecs.PortMapping(container_port=listener_port, host_port=listener_port)
+            )
+        else:
+            listener_port=80
 
         container = task_definition.add_container(
             id="MLflowContainer",
@@ -189,18 +196,17 @@ class MLflowStack(Stack):
             service_name=service_name,
             cluster=cluster,
             task_definition=task_definition,
+            listener_port=listener_port,
             cloud_map_options=ecs.CloudMapOptions(
-                container=container,
-                container_port=80,
-                dns_record_type=cloudmap.DnsRecordType.A
-            ),
-            listener_port=8080
+                dns_record_type=cloudmap.DnsRecordType.A,
+                name="mlflow-server"
+            )
         )
 
         # Setup security group
         fargate_service.service.connections.security_groups[0].add_ingress_rule(
             peer=ec2.Peer.ipv4(vpc.vpc_cidr_block),
-            connection=ec2.Port.tcp(8080),
+            connection=ec2.Port.tcp(listener_port),
             description="Allow inbound from VPC for mlflow",
         )
 
