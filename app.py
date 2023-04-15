@@ -169,7 +169,7 @@ class MLflowStack(Stack):
                 ecs.PortMapping(container_port=listener_port, host_port=listener_port)
             )
         else:
-            listener_port=80
+            listener_port=5000
 
         container = task_definition.add_container(
             id="MLflowContainer",
@@ -186,7 +186,7 @@ class MLflowStack(Stack):
             logging=ecs.LogDriver.aws_logs(stream_prefix="mlflow"),
         )
         port_mapping = ecs.PortMapping(
-            container_port=80, host_port=80, protocol=ecs.Protocol.TCP
+            container_port=5000, host_port=5000, protocol=ecs.Protocol.TCP
         )
         container.add_port_mappings(port_mapping)
 
