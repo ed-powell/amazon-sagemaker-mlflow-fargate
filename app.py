@@ -34,7 +34,6 @@ class MLflowStack(Stack):
         container_repo_name = "mlflow-containers"
         cluster_name = "mlflow-cluster"
         service_name = "mlflow-service"
-        UseNginx = False
         domain_name = os.environ["MLFLOW_DOMAIN_NAME"]
         certificate_arn = os.environ.get("MLFLOW_CERTIFICATE_ARN")
         mlf_username = os.environ["MLFLOW_USERNAME"]
@@ -156,20 +155,6 @@ class MLflowStack(Stack):
             cpu=4 * 1024,
             memory_limit_mib=8 * 1024,
         )
-        if UseNginx:
-            listener_port=8080
-            nginx_container = task_definition.add_container(
-                id="NginxContainer",
-                image=ecs.ContainerImage.from_asset(directory="proxy",
-                    build_args={"MLF_USERNAME": mlf_username, "MLF_PASSWORD": mlf_password}
-                ),
-                logging = ecs.LogDriver.aws_logs(stream_prefix="nginx")
-            )
-            nginx_container.add_port_mappings(
-                ecs.PortMapping(container_port=listener_port, host_port=listener_port)
-            )
-        else:
-            listener_port=5000
 
         container = task_definition.add_container(
             id="MLflowContainer",
@@ -196,7 +181,7 @@ class MLflowStack(Stack):
             service_name=service_name,
             cluster=cluster,
             task_definition=task_definition,
-            listener_port=listener_port,
+            listener_port=5000,
             cloud_map_options=ecs.CloudMapOptions(
                 dns_record_type=cloudmap.DnsRecordType.A,
                 name="mlflow-server"
@@ -206,7 +191,7 @@ class MLflowStack(Stack):
         # Setup security group
         fargate_service.service.connections.security_groups[0].add_ingress_rule(
             peer=ec2.Peer.ipv4(vpc.vpc_cidr_block),
-            connection=ec2.Port.tcp(listener_port),
+            connection=ec2.Port.tcp(5000),
             description="Allow inbound from VPC for mlflow",
         )
 
@@ -218,6 +203,58 @@ class MLflowStack(Stack):
             scale_in_cooldown=Duration.seconds(60),
             scale_out_cooldown=Duration.seconds(60),
         )
+
+        # ==================================================
+        # =============== NGINX FARGATE SERVICE ============
+        # ==================================================
+
+        nginx_task_definition = ecs.FargateTaskDefinition(
+            scope=self,
+            id="NginxTask",
+            task_role=role,
+            cpu=4 *1024,
+            memory_limit_mib=8 * 1024,
+        )
+
+        nginx_container = nginx_task_definition.add_container(
+            id="NginxContainer",
+            image=ecs.ContainerImage.from_asset(directory="proxy",
+                                                build_args={"MLF_USERNAME": mlf_username,
+                                                            "MLF_PASSWORD": mlf_password}
+                                                ),
+            logging=ecs.LogDriver.aws_logs(stream_prefix="nginx")
+        )
+        nginx_container.add_port_mappings(
+            ecs.PortMapping(container_port=8080, host_port=8080)
+        )
+
+        nginx_service = ecs_patterns.NetworkLoadBalancedFargateService(
+            scope=self,
+            id="NginxReverseProxy",
+            service_name="nginx-proxy",
+            cluster=cluster,
+            task_definition=nginx_task_definition,
+            listener_port=8080,
+            cloud_map_options=ecs.CloudMapOptions(
+                dns_record_type=cloudmap.DnsRecordType.A,
+                name="nginx-proxy"
+            )
+        )
+        nginx_service.service.connections.security_groups[0].add_ingress_rule(
+            peer=ec2.Peer.ipv4(vpc.vpc_cidr_block),
+            connection=ec2.Port.tcp(8080),
+            description="Allow inbound from VPC for nginx",
+        )
+
+        # Setup autoscaling policy
+        scaling = nginx_service.service.auto_scale_task_count(max_capacity=2)
+        scaling.scale_on_cpu_utilization(
+            id="AUTOSCALING",
+            target_utilization_percent=70,
+            scale_in_cooldown=Duration.seconds(60),
+            scale_out_cooldown=Duration.seconds(60),
+        )
+
         # ==================================================
         # =================== OUTPUTS ======================
         # ==================================================
@@ -226,7 +263,11 @@ class MLflowStack(Stack):
             id="LoadBalancerDNS",
             value=fargate_service.load_balancer.load_balancer_dns_name,
         )
-
+        CfnOutput(
+            scope=self,
+            id="NginxReverseProxyDNS",
+            value=nginx_service.load_balancer.load_balancer_dns_name,
+        )
 
 app = App()
 MLflowStack(app, "MLflowStack")
