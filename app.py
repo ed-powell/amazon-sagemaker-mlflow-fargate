@@ -198,11 +198,12 @@ class MLflowStack(Stack):
         )
 
         # Setup security group
-        fargate_service.service.connections.security_groups[0].add_ingress_rule(
-            peer=ec2.Peer.ipv4(vpc.vpc_cidr_block),
-            connection=ec2.Port.tcp(5000),
-            description="Allow inbound from VPC for mlflow",
-        )
+        if False:
+            fargate_service.service.connections.security_groups[0].add_ingress_rule(
+                peer=ec2.Peer.ipv4(vpc.vpc_cidr_block),
+                connection=ec2.Port.tcp(5000),
+                description="Allow inbound from VPC for mlflow",
+            )
 
         # Setup autoscaling policy
         scaling = fargate_service.service.auto_scale_task_count(max_capacity=2)
