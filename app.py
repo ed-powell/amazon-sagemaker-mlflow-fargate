@@ -193,7 +193,7 @@ class MLflowStack(Stack):
             listener_port=5000,
             cloud_map_options=ecs.CloudMapOptions(
                 dns_record_type=cloudmap.DnsRecordType.A,
-                name="mlflow-server"
+                name=service_name
             )
         )
 
