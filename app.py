@@ -38,13 +38,14 @@ class MLflowStack(Stack):
         port = 3306
         username = "master"
         bucket_name = f"{project_name_param.value_as_string}-artifacts-{Aws.ACCOUNT_ID}"
-        container_repo_name = "mlflow-containers"
         cluster_name = "mlflow-cluster"
         service_name = "mlflow-service"
         domain_name = os.environ["MLFLOW_DOMAIN_NAME"]
         certificate_arn = os.environ.get("MLFLOW_CERTIFICATE_ARN")
         mlf_username = os.environ["MLFLOW_USERNAME"]
         mlf_password = os.environ["MLFLOW_PASSWORD"]
+        UseHttps = False
+        BypassEnable = False
 
         # ==================================================
         # ================= IAM ROLE =======================
@@ -74,17 +75,6 @@ class MLflowStack(Stack):
             generate_secret_string=sm.SecretStringGenerator(
                 password_length=20, exclude_punctuation=True
             ),
-        )
-
-        sm.Secret(
-            scope=self,
-            id="MLFSECRET",
-            secret_name="MLflow_Login",
-            generate_secret_string=sm.SecretStringGenerator(
-                password_length=20, exclude_punctuation=True,
-                secret_string_template=json.dumps({"Username": "mlflow-user"}),
-                generate_string_key='Password'
-            )
         )
 
         # ==================================================
@@ -176,6 +166,7 @@ class MLflowStack(Stack):
         )
 
         container = task_definition.add_container(
+            id="MLflowContainer",
             container_name="mlflow-server",
             image=ecs.ContainerImage.from_asset(directory="container"),
             environment={
@@ -188,9 +179,10 @@ class MLflowStack(Stack):
             secrets={"PASSWORD": ecs.Secret.from_secrets_manager(db_password_secret)},
             logging=ecs.LogDriver.aws_logs(stream_prefix="mlflow"),
         )
-        container.add_port_mappings(
-            ecs.PortMapping(container_port=5000, host_port=5000)
+        port_mapping = ecs.PortMapping(
+            container_port=5000, host_port=5000, protocol=ecs.Protocol.TCP
         )
+        container.add_port_mappings(port_mapping)
 
         fargate_service = ecs_patterns.NetworkLoadBalancedFargateService(
             scope=self,
@@ -204,6 +196,7 @@ class MLflowStack(Stack):
                 name="mlflow-server"
             )
         )
+
         # Setup security group
         fargate_service.service.connections.security_groups[0].add_ingress_rule(
             peer=ec2.Peer.ipv4(vpc.vpc_cidr_block),
@@ -274,52 +267,59 @@ class MLflowStack(Stack):
         # ==================================================
         # ===============  HTTPS Support  ==================
         # ==================================================
+        if UseHttps:
+            # Create a hosted zone in Route 53 for the domain name
+            hosted_zone = route53.PublicHostedZone(self, "MLFlowPublicHostedZone", zone_name=domain_name)
 
-        # Create a hosted zone in Route 53 for the domain name
-        hosted_zone = route53.PublicHostedZone(self, "MLFlowPublicHostedZone", zone_name=domain_name)
-
-        # Create an A record alias that maps the domain name to the Fargate load balancer's DNS name
-        route53.ARecord(self, "AliasRecord",
+            # Create an A record alias that maps the domain name to the Fargate load balancer's DNS name
+            route53.ARecord(self, "AliasRecord",
                         zone=hosted_zone,
                         record_name=f"{domain_name}.",
-                        target=route53.RecordTarget.from_alias(alias_target=route53_targets.LoadBalancerTarget(lb)),
+                        target=route53.RecordTarget.from_alias(
+                            alias_target=route53_targets.LoadBalancerTarget(nginx_service.load_balancer)),
                         ttl=Duration.seconds(300))
 
-        # Create a certificate for HTTPS support, or use existing one specified as arn
-        if certificate_arn:
-            certificate = acm.Certificate.from_certificate_arn(self,
-                "MLFLOW_Certificate",
-                certificate_arn
-            )
-        else:
-            certificate = acm.Certificate(self,
-                "MLFLOW_Certificate",
-                domain_name=domain_name,
-                validation=acm.CertificateValidation.from_dns(hosted_zone)
+            # Create a certificate for HTTPS support, or use existing one specified as arn
+            if certificate_arn:
+                certificate = acm.Certificate.from_certificate_arn(self,
+                    "MLFLOW_Certificate",
+                    certificate_arn
+                )
+            else:
+                certificate = acm.Certificate(self,
+                    "MLFLOW_Certificate",
+                    domain_name=domain_name,
+                    validation=acm.CertificateValidation.from_dns(hosted_zone)
+                )
+
+            # Create a target group for the Fargate service
+            target_group = elbv2.ApplicationTargetGroup(
+                self,
+                "MlfTargetGroup",
+                vpc=vpc,
+                port=8080,
+                targets=[nginx_service.service],
+                protocol=elbv2.ApplicationProtocol.HTTP,
+                health_check=elbv2.HealthCheck(
+                    path="/",
+                    protocol=elbv2.Protocol.HTTP
+                )
             )
 
-        # Create a target group for the Fargate service
-        target_group = elbv2.ApplicationTargetGroup(
-            self,
-            "MyTargetGroup",
-            vpc=vpc,
-            port=8080,
-            targets=[nginx_service.service],
-            protocol=elbv2.ApplicationProtocol.HTTP,
-            health_check=elbv2.HealthCheck(
-                path="/",
-                protocol=elbv2.Protocol.HTTP
+            # Create an HTTPS listener on port 443
+            nginx_service.load_balancer.add_listener(
+                "MlfHttpsListener",
+                port=443,
+                protocol=elbv2.ApplicationProtocol.HTTPS,
+                certificates=[certificate],
+                default_target_groups=[target_group]
             )
-        )
 
-        # Create an HTTPS listener on port 443
-        nginx_service.load_balancer.add_listener(
-            "MlfHttpsListener",
-            port=443,
-            protocol=elbv2.ApplicationProtocol.HTTPS,
-            certificates=[certificate],
-            default_target_groups=[target_group]
-         )
+            nginx_service.service.connections.security_groups[0].add_ingress_rule(
+                peer=ec2.Peer.ipv4(vpc.vpc_cidr_block),
+                connection=ec2.Port.tcp(443),
+                description="Allow inbound from VPC for nginx on https port",
+            )
 
         # ==================================================
         # =================== OUTPUTS ======================
@@ -334,12 +334,13 @@ class MLflowStack(Stack):
             id="NginxReverseProxyDNS",
             value=nginx_service.load_balancer.load_balancer_dns_name,
         )
-        CfnOutput(
-            scope=self,
-            id="LoadBalancerNameServers",
-            value=Fn.select(0, hosted_zone.hosted_zone_name_servers),
-            description=f"NameServers used for {domain_name}"
-        )
+        if UseHttps:
+            CfnOutput(
+                scope=self,
+                id="LoadBalancerNameServers",
+                value=Fn.select(0, hosted_zone.hosted_zone_name_servers),
+                description=f"NameServers used for {domain_name}"
+            )
 
 app = App()
 MLflowStack(app, "MLflowStack", env=Environment(
