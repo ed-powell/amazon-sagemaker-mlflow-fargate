@@ -198,7 +198,7 @@ class MLflowStack(Stack):
         )
 
         # Setup security group
-        if False:
+        if True:
             fargate_service.service.connections.security_groups[0].add_ingress_rule(
                 peer=ec2.Peer.ipv4(vpc.vpc_cidr_block),
                 connection=ec2.Port.tcp(5000),
