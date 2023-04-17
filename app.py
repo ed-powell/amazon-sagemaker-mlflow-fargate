@@ -256,6 +256,9 @@ class MLflowStack(Stack):
             description="Allow inbound from VPC for nginx",
         )
 
+        # add a dependency so that fargate service is deployed first
+        nginx_service.node.add_dependency(fargate_service)
+
         # Setup autoscaling policy
         scaling = nginx_service.service.auto_scale_task_count(max_capacity=2)
         scaling.scale_on_cpu_utilization(
