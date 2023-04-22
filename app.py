@@ -47,7 +47,7 @@ class MLflowStack(Stack):
         certificate_arn = os.environ.get("MLFLOW_CERTIFICATE_ARN")
         mlf_username = os.environ["MLFLOW_USERNAME"]
         mlf_password = os.environ["MLFLOW_PASSWORD"]
-        UseHttps = False
+        UseHttps = True
         UseRestart = False
 
         # ==================================================
@@ -389,7 +389,7 @@ def lambda_handler(event, context):
             nginx_service.load_balancer.add_listener(
                 "MlfHttpsListener",
                 port=443,
-                protocol=elbv2.ApplicationProtocol.HTTPS,
+                protocol=elbv2.Protocol.TLS,
                 certificates=[certificate],
                 default_target_groups=[target_group]
             )
