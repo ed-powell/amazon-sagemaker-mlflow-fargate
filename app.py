@@ -15,9 +15,6 @@ from aws_cdk import (
     aws_route53 as route53,
     aws_route53_targets as route53_targets,
     aws_servicediscovery as cloudmap,
-    aws_lambda as _lambda,
-    aws_events as events,
-    aws_events_targets as targets,
     App,
     Stack,
     CfnParameter,
@@ -47,8 +44,6 @@ class MLflowStack(Stack):
         certificate_arn = os.environ.get("MLFLOW_CERTIFICATE_ARN")
         mlf_username = os.environ["MLFLOW_USERNAME"]
         mlf_password = os.environ["MLFLOW_PASSWORD"]
-        UseHttps = True
-        UseRestart = False
 
         # ==================================================
         # ================= IAM ROLE =======================
@@ -200,15 +195,6 @@ class MLflowStack(Stack):
             )
         )
 
-        # Setup security group
-        # Note: with this left out the mlflow service fails to deploy
-        # Apparently health checker cannot connect
-        fargate_service.service.connections.security_groups[0].add_ingress_rule(
-            peer=ec2.Peer.ipv4(vpc.vpc_cidr_block),
-            connection=ec2.Port.tcp(5000),
-            description="Allow inbound from VPC for mlflow",
-        )
-
         # Setup autoscaling policy
         scaling = fargate_service.service.auto_scale_task_count(max_capacity=2)
         scaling.scale_on_cpu_utilization(
@@ -255,14 +241,24 @@ class MLflowStack(Stack):
                 name="nginx-proxy"
             )
         )
-        nginx_service.service.connections.security_groups[0].add_ingress_rule(
-            peer=ec2.Peer.ipv4(vpc.vpc_cidr_block),
-            connection=ec2.Port.tcp(8080),
-            description="Allow inbound from VPC for nginx",
+        # Setup security group connections between the services
+        # Note: without the proper security groups the service fails to deploy
+         # Allow inbound traffic from the Nginx reverse proxy on port 5000 to the backend Fargate service
+        fargate_service.service.connections.security_groups[0].add_ingress_rule(
+            peer=nginx_service.service.connections.security_groups[0],
+            connection=ec2.Port.tcp(5000),
+            description="Allow inbound to mlflow-service from nginx-proxy",
         )
-
-        # add a dependency so that fargate service is deployed first
-        nginx_service.node.add_dependency(fargate_service)
+        # Allow inbound traffic from the load balancer of the Nginx reverse proxy on port 8080 to the backend Fargate service
+        nginx_security_group = nginx_service.service.connections.security_groups[0]
+        nginx_load_balancer_security_group = ec2.SecurityGroup.from_security_group_id(
+            self, "NginxLoadBalancerSecurityGroup", nginx_security_group.security_group_id
+        )
+        fargate_service.service.connections.security_groups[0].add_ingress_rule(
+            peer=nginx_load_balancer_security_group,
+            connection=ec2.Port.tcp(8080),
+            description="Allow inbound from nginx-proxy load balancer on port 8080",
+        )
 
         # Setup autoscaling policy
         scaling = nginx_service.service.auto_scale_task_count(max_capacity=2)
@@ -274,131 +270,57 @@ class MLflowStack(Stack):
         )
 
         # ==================================================
-        # ==========  Restart PROXY on Deploy  =============
-        # ==================================================
-        if UseRestart:
-
-            # Define the IAM role for the Lambda function
-            lambda_role = iam.Role(
-                self, 'LambdaRole',
-                assumed_by=iam.ServicePrincipal('lambda.amazonaws.com')
-            )
-
-            # Add the required IAM policy to the role
-            ecs_service_arn = 'arn:aws:ecs:{}:{}:service/{}'.format(self.region, self.account, 'nginx-proxy')
-            lambda_role.add_to_policy(iam.PolicyStatement(
-                effect=iam.Effect.ALLOW,
-                actions=['ecs:UpdateService', 'ecs:DescribeServices'],
-                resources=[ecs_service_arn]
-            ))
-            # Define the Lambda function that will restart the dependent service
-            restart_dependent_service_function = _lambda.Function(
-                self, 'RestartDependentServiceFunction',
-                runtime=_lambda.Runtime.PYTHON_3_9,
-                handler='index.handler',
-                role=lambda_role,
-                code=_lambda.Code.from_inline("""
-import boto3
-import os
-
-ecs = boto3.client('ecs')
-
-def lambda_handler(event, context):
-    service_name = os.environ['SERVICE_NAME']
-    cluster_arn = os.environ['CLUSTER_ARN']
-
-    response = ecs.update_service(
-        cluster=cluster_arn,
-        service=service_name,
-        forceNewDeployment=True,
-    )
-
-    return response
-                """),
-                environment={
-                    'SERVICE_NAME': nginx_service.service.service_name,
-                    'CLUSTER_ARN': nginx_service.service.cluster.cluster_arn,
-                },
-            )
-            # add a dependency so that nginx service is deployed before restart rule
-            restart_dependent_service_function.node.add_dependency(nginx_service)
-
-            # Define the CloudWatch Event rule that will trigger the Lambda function
-            ecs_service_update_rule = events.Rule(
-                self, 'ECSServiceUpdateRule',
-                event_pattern={
-                    'source': ['aws.ecs'],
-                    'detail': {
-                        'type': ['ECS Task State Change'],
-                        'clusterArn': [nginx_service.service.cluster.cluster_arn],
-                        'group': [nginx_service.service.service_name],
-                        'lastStatus': ['STOPPED', 'RUNNING'],
-                    },
-                },
-            )
-
-
-            # Add the Lambda function as a target for the CloudWatch Event rule
-            ecs_service_update_rule.add_target(
-                targets.LambdaFunction(restart_dependent_service_function)
-            )
-
-            # add a dependency so that nginx service is deployed before restart rule
-            ecs_service_update_rule.node.add_dependency(nginx_service)
-
-        # ==================================================
         # ===============  HTTPS Support  ==================
         # ==================================================
-        if UseHttps:
-           # Create a hosted zone in Route 53 for the domain name
-            hosted_zone = route53.PublicHostedZone(self, "MLFlowPublicHostedZone", zone_name=domain_name)
 
-            # Create an A record alias that maps the domain name to the Fargate load balancer's DNS name
-            route53.ARecord(self, "AliasRecord",
+        # Create a hosted zone in Route 53 for the domain name
+        hosted_zone = route53.PublicHostedZone(self, "MLFlowPublicHostedZone", zone_name=domain_name)
+
+        # Create an A record alias that maps the domain name to the Fargate load balancer's DNS name
+        route53.ARecord(self, "AliasRecord",
                         zone=hosted_zone,
                         record_name=f"{domain_name}.",
                         target=route53.RecordTarget.from_alias(
                             alias_target=route53_targets.LoadBalancerTarget(nginx_service.load_balancer)),
                         ttl=Duration.seconds(300))
 
-            # Create a certificate for HTTPS support, or use existing one specified as arn
-            if certificate_arn:
-                certificate = acm.Certificate.from_certificate_arn(self,
-                    "MLFLOW_Certificate",
-                    certificate_arn
-                )
-            else:
-                certificate = acm.Certificate(self,
-                    "MLFLOW_Certificate",
-                    domain_name=domain_name,
-                    validation=acm.CertificateValidation.from_dns(hosted_zone)
-                )
-
-        if UseHttps:
-            # Create a target group for the Fargate service
-            target_group = elbv2.NetworkTargetGroup(
-                self,
-                "MlfTargetGroup",
-                vpc=vpc,
-                port=8080,
-                protocol=elbv2.Protocol.TCP,
-                targets=[nginx_service.service]
+        # Create a certificate for HTTPS support, or use existing one specified as arn
+        if certificate_arn:
+            certificate = acm.Certificate.from_certificate_arn(self,
+                "MLFLOW_Certificate",
+                certificate_arn
+            )
+        else:
+            certificate = acm.Certificate(self,
+                "MLFLOW_Certificate",
+                domain_name=domain_name,
+                validation=acm.CertificateValidation.from_dns(hosted_zone)
             )
 
-            # Create an HTTPS listener on port 443
-            nginx_service.load_balancer.add_listener(
-                "MlfHttpsListener",
-                port=443,
-                protocol=elbv2.Protocol.TLS,
-                certificates=[certificate],
-                default_target_groups=[target_group]
-            )
+        # Create a target group for the Fargate service
+        target_group = elbv2.NetworkTargetGroup(
+            self,
+            "MlfTargetGroup",
+            vpc=vpc,
+            port=8080,
+            protocol=elbv2.Protocol.TCP,
+            targets=[nginx_service.service]
+        )
 
-            nginx_service.service.connections.security_groups[0].add_ingress_rule(
-                peer=ec2.Peer.ipv4(vpc.vpc_cidr_block),
-                connection=ec2.Port.tcp(443),
-                description="Allow inbound from VPC for nginx on https port",
-            )
+        # Create an HTTPS listener on port 443
+        nginx_service.load_balancer.add_listener(
+            "MlfHttpsListener",
+            port=443,
+            protocol=elbv2.Protocol.TLS,
+            certificates=[certificate],
+            default_target_groups=[target_group]
+        )
+
+        nginx_service.service.connections.security_groups[0].add_ingress_rule(
+            peer=ec2.Peer.ipv4(vpc.vpc_cidr_block),
+            connection=ec2.Port.tcp(443),
+            description="Allow inbound from VPC for nginx on https port",
+        )
 
         # ==================================================
         # =================== OUTPUTS ======================
@@ -413,13 +335,12 @@ def lambda_handler(event, context):
             id="NginxReverseProxyDNS",
             value=nginx_service.load_balancer.load_balancer_dns_name,
         )
-        if UseHttps:
-            CfnOutput(
-                scope=self,
-                id="LoadBalancerNameServers",
-                value=Fn.select(0, hosted_zone.hosted_zone_name_servers),
-                description=f"NameServers used for {domain_name}"
-            )
+        CfnOutput(
+            scope=self,
+            id="LoadBalancerNameServers",
+            value=Fn.select(0, hosted_zone.hosted_zone_name_servers),
+            description=f"NameServers used for {domain_name}"
+        )
 
 app = App()
 MLflowStack(app, "MLflowStack", env=Environment(
