@@ -44,6 +44,7 @@ class MLflowStack(Stack):
         certificate_arn = os.environ.get("MLFLOW_CERTIFICATE_ARN")
         mlf_username = os.environ["MLFLOW_USERNAME"]
         mlf_password = os.environ["MLFLOW_PASSWORD"]
+        closeHttp = False
 
         # ==================================================
         # ================= IAM ROLE =======================
@@ -182,10 +183,11 @@ class MLflowStack(Stack):
         )
         container.add_port_mappings(port_mapping)
 
-        fargate_service = ecs_patterns.NetworkLoadBalancedFargateService(
+        mlf_service = ecs_patterns.NetworkLoadBalancedFargateService(
             scope=self,
             id="MLFLOW",
             service_name=service_name,
+            #assign_public_ip=False,
             cluster=cluster,
             task_definition=task_definition,
             listener_port=5000,
@@ -196,7 +198,7 @@ class MLflowStack(Stack):
         )
 
         # Setup autoscaling policy
-        scaling = fargate_service.service.auto_scale_task_count(max_capacity=2)
+        scaling = mlf_service.service.auto_scale_task_count(max_capacity=1)
         scaling.scale_on_cpu_utilization(
             id="AUTOSCALING",
             target_utilization_percent=70,
@@ -244,24 +246,46 @@ class MLflowStack(Stack):
         # Setup security group connections between the services
         # Note: without the proper security groups the service fails to deploy
          # Allow inbound traffic from the Nginx reverse proxy on port 5000 to the backend Fargate service
-        fargate_service.service.connections.security_groups[0].add_ingress_rule(
-            peer=nginx_service.service.connections.security_groups[0],
-            connection=ec2.Port.tcp(5000),
-            description="Allow inbound to mlflow-service from nginx-proxy",
-        )
-        # Allow inbound traffic from the load balancer of the Nginx reverse proxy on port 8080 to the backend Fargate service
-        nginx_security_group = nginx_service.service.connections.security_groups[0]
-        nginx_load_balancer_security_group = ec2.SecurityGroup.from_security_group_id(
-            self, "NginxLoadBalancerSecurityGroup", nginx_security_group.security_group_id
-        )
-        fargate_service.service.connections.security_groups[0].add_ingress_rule(
-            peer=nginx_load_balancer_security_group,
-            connection=ec2.Port.tcp(8080),
-            description="Allow inbound from nginx-proxy load balancer on port 8080",
+        if closeHttp:
+            mlf_service.service.connections.security_groups[0].add_ingress_rule(
+                peer=nginx_service.service.connections.security_groups[0],
+                connection=ec2.Port.tcp(5000),
+                description="Allow inbound to mlflow-service from nginx-proxy",
+            )
+            # Allow inbound traffic from the load balancer of the Nginx reverse proxy on port 8080 to the backend Fargate service
+            nginx_security_group = nginx_service.service.connections.security_groups[0]
+            nginx_load_balancer_security_group = ec2.SecurityGroup.from_security_group_id(
+                self, "NginxLoadBalancerSecurityGroup", nginx_security_group.security_group_id
+            )
+            mlf_service.service.connections.security_groups[0].add_ingress_rule(
+                peer=nginx_load_balancer_security_group,
+                connection=ec2.Port.tcp(8080),
+                description="Allow inbound from nginx-proxy load balancer on port 8080",
+            )
+        else:
+            mlf_service.service.connections.security_groups[0].add_ingress_rule(
+                peer=ec2.Peer.ipv4(vpc.vpc_cidr_block),
+                connection=ec2.Port.tcp(5000),
+                description="Allow inbound from VPC for mlflow",
+            )
+            nginx_service.service.connections.security_groups[0].add_ingress_rule(
+                peer=ec2.Peer.ipv4(vpc.vpc_cidr_block),
+                connection=ec2.Port.tcp(8080),
+                description="Allow inbound from VPC for nginx",
+            )
+
+        # Create a target group for the Fargate service
+        nginx_target_group = elbv2.NetworkTargetGroup(
+            self,
+            "NginxTargetGroup",
+            vpc=vpc,
+            port=8080,
+            protocol=elbv2.Protocol.TCP,
+            targets=[nginx_service.service]
         )
 
         # Setup autoscaling policy
-        scaling = nginx_service.service.auto_scale_task_count(max_capacity=2)
+        scaling = nginx_service.service.auto_scale_task_count(max_capacity=1)
         scaling.scale_on_cpu_utilization(
             id="AUTOSCALING",
             target_utilization_percent=70,
@@ -297,23 +321,13 @@ class MLflowStack(Stack):
                 validation=acm.CertificateValidation.from_dns(hosted_zone)
             )
 
-        # Create a target group for the Fargate service
-        target_group = elbv2.NetworkTargetGroup(
-            self,
-            "MlfTargetGroup",
-            vpc=vpc,
-            port=8080,
-            protocol=elbv2.Protocol.TCP,
-            targets=[nginx_service.service]
-        )
-
         # Create an HTTPS listener on port 443
         nginx_service.load_balancer.add_listener(
             "MlfHttpsListener",
             port=443,
             protocol=elbv2.Protocol.TLS,
             certificates=[certificate],
-            default_target_groups=[target_group]
+            default_target_groups=[nginx_target_group]
         )
 
         nginx_service.service.connections.security_groups[0].add_ingress_rule(
@@ -328,7 +342,7 @@ class MLflowStack(Stack):
         CfnOutput(
             scope=self,
             id="LoadBalancerDNS",
-            value=fargate_service.load_balancer.load_balancer_dns_name,
+            value=mlf_service.load_balancer.load_balancer_dns_name,
         )
         CfnOutput(
             scope=self,
