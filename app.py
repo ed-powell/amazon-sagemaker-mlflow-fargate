@@ -236,12 +236,12 @@ class MLflowStack(Stack):
         mlf_service.connections.security_groups[0].add_ingress_rule(
             peer=nginx_service.service.connections.security_groups[0],
             connection=ec2.Port.tcp(5000),
-            description="Allow inbound to mlflow-service from nginx-proxy",
+            description="Allow inbound to mlflow-service from nginx-proxy"
         )
         nginx_service.service.connections.security_groups[0].add_ingress_rule(
             peer=ec2.Peer.ipv4(vpc.vpc_cidr_block),
-            onnection=ec2.Port.tcp(8080),
-            description="Allow inbound from VPC for nginx",
+            connection=ec2.Port.tcp(8080),
+            description="Allow inbound from VPC for nginx"
         )
 
         # Create a target group for the Fargate service
@@ -264,7 +264,9 @@ class MLflowStack(Stack):
         )
 
         # add a dependency so that mlf service is always deployed first
-        nginx_service.node.add_dependency(mlf_service)
+        # NOTE: This somehow creates a circular dependency, so we
+        # will let building from scratch take longer.
+        #nginx_service.node.add_dependency(mlf_service)
 
         # ==================================================
         # ===============  HTTPS Support  ==================
