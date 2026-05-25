@@ -1,5 +1,7 @@
 ## Manage your machine learning lifecycle with MLflow and Amazon SageMaker
 
+**Note:** SageMaker now supports a fully managed MLflow. We recommend you follow this [blog post for the latest](https://aws.amazon.com/blogs/machine-learning/accelerating-generative-ai-development-with-fully-managed-mlflow-3-0-on-amazon-sagemaker-ai/).
+
 ### Overview
 
 In this repository we show how to deploy MLflow on AWS Fargate and how to use it during your ML project
