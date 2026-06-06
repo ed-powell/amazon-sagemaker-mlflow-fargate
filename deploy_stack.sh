@@ -2,12 +2,12 @@
 
 # INSTALL NODE
 # sudo yum install -y gcc-c++ make
-# curl -sL https://rpm.nodesource.com/setup_16.x | sudo bash -
+# curl -sL https://rpm.nodesource.com/setup_22.x | sudo bash -
 # sudo yum install -y nodejs
 
 
 # INSTALL CDK
-# npm install -g aws-cdk@2.92.0
+# npm install -g aws-cdk@2.150.0
 # python3 -m venv .venv
 # source .venv/bin/activate
 # pip3 install -r requirements.txt

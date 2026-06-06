@@ -30,6 +30,7 @@ class MLflowStack(Stack):
         db_name = "mlflowdb"
         port = 3306
         username = "master"
+        admin_username = "admin"
         bucket_name = f"{project_name_param.value_as_string}-artifacts-{Aws.ACCOUNT_ID}"
         container_repo_name = "mlflow-containers"
         cluster_name = "mlflow"
@@ -75,12 +76,21 @@ class MLflowStack(Stack):
             name="DB", subnet_type=ec2.SubnetType.PRIVATE_ISOLATED, cidr_mask=28
         )
 
+        # Use a low-cost NAT instance (t3.nano, ~$4/mo) instead of a managed
+        # NAT gateway (~$32/mo) to minimize cost for outbound traffic (e.g.
+        # ECR image pulls). S3 egress is already free via the gateway endpoint.
+        nat_instance_provider = ec2.NatProvider.instance_v2(
+            instance_type=ec2.InstanceType.of(
+                ec2.InstanceClass.BURSTABLE3, ec2.InstanceSize.NANO
+            ),
+        )
+
         vpc = ec2.Vpc(
             scope=self,
             id="VPC",
             ip_addresses=ec2.IpAddresses.cidr("10.0.0.0/24"),
             max_azs=2,
-            nat_gateway_provider=ec2.NatProvider.gateway(),
+            nat_gateway_provider=nat_instance_provider,
             nat_gateways=1,
             subnet_configuration=[public_subnet, private_subnet, isolated_subnet],
         )
@@ -120,8 +130,9 @@ class MLflowStack(Stack):
                 version=rds.MysqlEngineVersion.VER_8_0_34
             ),
             instance_type=ec2.InstanceType.of(
-                ec2.InstanceClass.M5, ec2.InstanceSize.LARGE
+                ec2.InstanceClass.BURSTABLE3, ec2.InstanceSize.MICRO
             ),
+            allocated_storage=20,
             vpc=vpc,
             security_groups=[sg_rds],
             vpc_subnets=ec2.SubnetSelection(
@@ -142,8 +153,8 @@ class MLflowStack(Stack):
             scope=self,
             id="MLflow",
             task_role=role,
-            cpu=4 * 1024,
-            memory_limit_mib=8 * 1024,
+            cpu=256,  # 0.25 vCPU (Amazon recommended minimal size)
+            memory_limit_mib=1024,  # 1024 MiB (Amazon recommended minimal size)
         )
 
         container = task_definition.add_container(
@@ -155,8 +166,14 @@ class MLflowStack(Stack):
                 "PORT": str(port),
                 "DATABASE": db_name,
                 "USERNAME": username,
+                "ADMIN_USERNAME": admin_username,
             },
-            secrets={"PASSWORD": ecs.Secret.from_secrets_manager(db_password_secret)},
+            secrets={
+                "PASSWORD": ecs.Secret.from_secrets_manager(db_password_secret),
+                # Reuse the DB password secret as the initial admin password.
+                # Change it via the MLflow UI after first login.
+                "ADMIN_PASSWORD": ecs.Secret.from_secrets_manager(db_password_secret),
+            },
             logging=ecs.LogDriver.aws_logs(stream_prefix="mlflow"),
         )
         port_mapping = ecs.PortMapping(
@@ -180,7 +197,7 @@ class MLflowStack(Stack):
         )
 
         # Setup autoscaling policy
-        scaling = fargate_service.service.auto_scale_task_count(max_capacity=2)
+        scaling = fargate_service.service.auto_scale_task_count(max_capacity=1)
         scaling.scale_on_cpu_utilization(
             id="AUTOSCALING",
             target_utilization_percent=70,
