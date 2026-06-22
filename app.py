@@ -16,6 +16,7 @@ from aws_cdk import (
     Aws,
     RemovalPolicy,
     Duration,
+    Tags,
 )
 from constructs import Construct
 
@@ -27,6 +28,15 @@ class MLflowStack(Stack):
         # ======= CFN PARAMETERS =======
         # ==============================
         project_name_param = CfnParameter(scope=self, id="ProjectName", type="String")
+
+        # ==============================
+        # ========== TAGGING ===========
+        # ==============================
+        # Apply a "Project" tag to every taggable resource in this stack. CDK's
+        # Tags aspect propagates the tag to all constructs in scope, so new
+        # resources are tagged automatically without touching each one.
+        Tags.of(self).add("Project", project_name_param.value_as_string)
+
         db_name = "mlflowdb"
         port = 3306
         username = "master"

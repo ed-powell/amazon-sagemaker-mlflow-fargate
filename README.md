@@ -78,7 +78,8 @@ The first 2 commands will get your account ID and current AWS region using the A
 bootstrap``` and ```cdk deploy``` will build the container image locally, push it to ECR, and deploy the stack. 
 
 The stack will take a few minutes to launch the MLflow server on AWS Fargate, with an S3 bucket and a MySQL database on
-RDS. You can then use the load balancer URI present in the stack outputs to access the MLflow UI:
+RDS. You can then use the load balancer URI present in the stack outputs to access the MLflow UI over plain
+HTTP on port 80 (i.e. `http://<load balancer URI>`):
 ![](media/load-balancer.png)
 ![](media/mlflow-interface.png)
 
