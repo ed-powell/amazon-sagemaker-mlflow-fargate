@@ -32,12 +32,15 @@ The CDK stack in [app.py](app.py) provisions the following resources:
   replacement for a managed NAT gateway.
 * **Amazon S3 bucket** — the MLflow artifact store.
 * **Amazon RDS for MySQL** (`t3.micro`, single-AZ, 20 GB) — the MLflow backend store *and* the basic-auth user/permission store.
-* **Amazon ECS on AWS Fargate** — one task (0.25 vCPU / 1 GB) running the MLflow server container, fronted by a
-  **Network Load Balancer**. The container image is stored in **Amazon ECR**.
+* **Amazon ECS on AWS Fargate** — one task (0.25 vCPU / 1 GB) running the MLflow server container, fronted by an
+  **Application Load Balancer** serving **HTTPS** (TLS terminates at the ALB; HTTP on port 80 redirects to 443). The
+  container image is stored in **Amazon ECR**.
+* **AWS Certificate Manager (ACM)** — the public TLS certificate for the HTTPS listener (passed in via the `CertificateArn`
+  stack parameter; free).
 * **AWS Secrets Manager** — holds the auto-generated database password (also reused as the initial admin password).
 * **CloudWatch Logs** — container logs under the `mlflow` stream prefix.
 
-The MLflow server runs with `--app-name basic-auth`, so the Network Load Balancer endpoint requires a username and password
+The MLflow server runs with `--app-name basic-auth`, so the HTTPS endpoint requires a username and password
 (see [Enabling native user authentication](#enabling-native-user-authentication)).
 
 ### Prerequisites
@@ -78,8 +81,9 @@ The first 2 commands will get your account ID and current AWS region using the A
 bootstrap``` and ```cdk deploy``` will build the container image locally, push it to ECR, and deploy the stack. 
 
 The stack will take a few minutes to launch the MLflow server on AWS Fargate, with an S3 bucket and a MySQL database on
-RDS. You can then use the load balancer URI present in the stack outputs to access the MLflow UI over plain
-HTTP on port 80 (i.e. `http://<load balancer URI>`):
+RDS. Point a DNS CNAME at the load balancer hostname from the stack outputs and access the MLflow UI over HTTPS
+at that name (e.g. `https://mlflow.deepmm.com`). The certificate is issued for that domain, so browse to the domain
+rather than the raw load balancer hostname:
 ![](media/load-balancer.png)
 ![](media/mlflow-interface.png)
 
@@ -112,9 +116,10 @@ region, and change over time — use the [AWS Pricing Calculator](https://calcul
 |---|---|---|
 | AWS Fargate | 1 task, 0.25 vCPU + 1 GB, 730 hrs | ~$11 |
 | Amazon RDS (MySQL) | `db.t3.micro`, single-AZ + 20 GB gp2 storage | ~$15 |
-| Network Load Balancer | 1 NLB (base + light LCU usage) | ~$18 |
+| Application Load Balancer | 1 ALB (base + light LCU usage) | ~$18 |
+| AWS Certificate Manager | 1 public TLS certificate | $0 (free) |
 | NAT instance | `t3.nano` + 8 GB EBS | ~$5 |
-| Public IPv4 addresses | NAT instance + NLB (AWS charges $0.005/hr each) | ~$4–8 |
+| Public IPv4 addresses | NAT instance + ALB (AWS charges $0.005/hr each) | ~$4–8 |
 | AWS Secrets Manager | 1 secret (`dbPassword`) | ~$0.40 |
 | CloudWatch Logs | container logs, light volume | ~$1 |
 | Amazon ECR | container image storage (~1–2 GB) | ~$0.20 |
@@ -122,9 +127,11 @@ region, and change over time — use the [AWS Pricing Calculator](https://calcul
 | **Total** | | **~$55/mo** |
 
 Notes and exclusions:
-* **Data transfer** is not included and is usage-dependent (NAT instance egress, NLB/internet traffic, cross-AZ traffic).
+* **Data transfer** is not included and is usage-dependent (NAT instance egress, ALB/internet traffic, cross-AZ traffic).
 * **S3** cost grows with the size of logged artifacts and models.
-* The **NLB is the single largest fixed item**; if you only need access from inside the VPC you could remove it and reach
+* Enabling HTTPS added no meaningful cost: the ACM certificate is free and the ALB replaced the previous Network Load
+  Balancer at roughly the same price.
+* The **ALB is the single largest fixed item**; if you only need access from inside the VPC you could remove it and reach
   the Fargate task directly to save ~$18/mo.
 * Costs scale roughly linearly if you raise `max_capacity` (more Fargate tasks), enable RDS Multi-AZ, or increase the task size.
 * This is down from roughly **~$300/mo** for the original sample (4 vCPU / 8 GB Fargate, `m5.large` RDS, managed NAT gateway).
@@ -150,7 +157,7 @@ requires a username and password. It is turned on by launching the server with `
    ```
    aws secretsmanager get-secret-value --secret-id dbPassword --query SecretString --output text
    ```
-2. Open the load balancer URL, log in as `admin` with that password, and **change it immediately**
+2. Open the HTTPS URL (e.g. `https://mlflow.deepmm.com`), log in as `admin` with that password, and **change it immediately**
    (user menu in the UI, or the `/api/2.0/mlflow/users/update-password` endpoint).
 3. Add additional users with the Python client:
    ```python
@@ -159,21 +166,22 @@ requires a username and password. It is turned on by launching the server with `
 
    os.environ["MLFLOW_TRACKING_USERNAME"] = "admin"
    os.environ["MLFLOW_TRACKING_PASSWORD"] = "<admin password>"
-   client = get_app_client("basic-auth", tracking_uri="http://<YOUR LOAD BALANCER URI>")
+   client = get_app_client("basic-auth", tracking_uri="https://mlflow.deepmm.com")
    client.create_user(username="alice", password="<password>")
    ```
    You can also use the `/signup` page in the UI or the REST endpoints under `/api/2.0/mlflow/users/...`.
 4. Every tracking client (notebooks, CI, SageMaker) must now send credentials:
    ```
-   export MLFLOW_TRACKING_URI=http://<YOUR LOAD BALANCER URI>
+   export MLFLOW_TRACKING_URI=https://mlflow.deepmm.com
    export MLFLOW_TRACKING_USERNAME=alice
    export MLFLOW_TRACKING_PASSWORD=<password>
    ```
 
 **Security notes:**
-* Basic-auth credentials are only base64-encoded. The Network Load Balancer in this stack terminates **plain HTTP**, so logins
-  travel unencrypted. For anything beyond a private VPC/dev setup, add TLS (an ACM certificate on the load balancer, or front the
-  service with an ALB/CloudFront).
+* Basic-auth credentials are only base64-encoded, so they rely on TLS for confidentiality. This stack terminates **HTTPS**
+  at the Application Load Balancer using an ACM certificate, so credentials are encrypted in transit. (Traffic from the ALB
+  to the container is plain HTTP but stays within the VPC.) Always connect over `https://` — the HTTP :80 listener only
+  issues a redirect to HTTPS.
 * `default_permission` is set to `READ` in the Dockerfile's auth config — any authenticated user can read all experiments.
   Change it to `NO_PERMISSIONS` if you want users isolated by default.
 
