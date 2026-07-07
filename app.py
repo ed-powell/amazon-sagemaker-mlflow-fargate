@@ -9,6 +9,8 @@ from aws_cdk import (
     aws_iam as iam,
     aws_secretsmanager as sm,
     aws_ecs_patterns as ecs_patterns,
+    aws_certificatemanager as acm,
+    aws_elasticloadbalancingv2 as elbv2,
     App,
     Stack,
     CfnParameter,
@@ -28,6 +30,12 @@ class MLflowStack(Stack):
         # ======= CFN PARAMETERS =======
         # ==============================
         project_name_param = CfnParameter(scope=self, id="ProjectName", type="String")
+        certificate_arn_param = CfnParameter(
+            scope=self,
+            id="CertificateArn",
+            type="String",
+            description="ARN of the us-east-2 ACM certificate for the HTTPS listener (e.g. mlflow.deepmm.com)",
+        )
 
         # ==============================
         # ========== TAGGING ===========
@@ -191,19 +199,34 @@ class MLflowStack(Stack):
         )
         container.add_port_mappings(port_mapping)
 
-        fargate_service = ecs_patterns.NetworkLoadBalancedFargateService(
+        # Look up the pre-issued ACM certificate (created and DNS-validated out
+        # of band, since deepmm.com DNS is managed outside this AWS account).
+        certificate = acm.Certificate.from_certificate_arn(
+            self, "Cert", certificate_arn_param.value_as_string
+        )
+
+        # HTTPS Application Load Balancer: TLS terminates at the ALB and traffic
+        # is forwarded as HTTP to the container (port 5000) inside the VPC.
+        # redirect_http=True adds a :80 listener that 301-redirects to :443.
+        fargate_service = ecs_patterns.ApplicationLoadBalancedFargateService(
             scope=self,
             id="MLFLOW",
             service_name=service_name,
             cluster=cluster,
             task_definition=task_definition,
+            public_load_balancer=True,
+            listener_port=443,
+            protocol=elbv2.ApplicationProtocol.HTTPS,
+            certificate=certificate,
+            redirect_http=True,
         )
 
-        # Setup security group
-        fargate_service.service.connections.security_groups[0].add_ingress_rule(
-            peer=ec2.Peer.ipv4(vpc.vpc_cidr_block),
-            connection=ec2.Port.tcp(5000),
-            description="Allow inbound from VPC for mlflow",
+        # MLflow runs behind basic-auth and returns HTTP 401 until credentials
+        # are supplied, so a default "expect 200" health check would mark every
+        # task unhealthy. Treat 401 as healthy (the app is up, just unauthenticated).
+        fargate_service.target_group.configure_health_check(
+            path="/health",
+            healthy_http_codes="200,401",
         )
 
         # Setup autoscaling policy
