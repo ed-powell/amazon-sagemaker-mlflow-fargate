@@ -43,7 +43,10 @@ class MLflowStack(Stack):
         # Apply a "Project" tag to every taggable resource in this stack. CDK's
         # Tags aspect propagates the tag to all constructs in scope, so new
         # resources are tagged automatically without touching each one.
-        Tags.of(self).add("Project", project_name_param.value_as_string)
+        # Use a literal string, not project_name_param.value_as_string: a CfnParameter
+        # renders as an intrinsic {Ref: ProjectName} in the tag value, which
+        # CloudFormation rejects with "Tag [Project] contained invalid characters".
+        Tags.of(self).add("Project", "mlflow")
 
         db_name = "mlflowdb"
         port = 3306
