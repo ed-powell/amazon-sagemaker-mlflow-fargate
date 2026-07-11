@@ -151,7 +151,9 @@ class MLflowStack(Stack):
                 username=username, password=db_password_secret.secret_value
             ),
             engine=rds.DatabaseInstanceEngine.mysql(
-                version=rds.MysqlEngineVersion.VER_8_0_34
+                # 8.0.34 was deprecated/removed by RDS; use of() so we aren't
+                # limited to the versions baked into this CDK version's enum.
+                version=rds.MysqlEngineVersion.of("8.0.46", "8.0")
             ),
             instance_type=ec2.InstanceType.of(
                 ec2.InstanceClass.BURSTABLE3, ec2.InstanceSize.MICRO
