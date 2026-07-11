@@ -52,7 +52,10 @@ class MLflowStack(Stack):
         port = 3306
         username = "master"
         admin_username = "admin"
-        bucket_name = f"{project_name_param.value_as_string}-artifacts-{Aws.ACCOUNT_ID}"
+        # Include the region: S3 bucket names are globally unique, and a bucket
+        # named "<project>-artifacts-<account>" already exists in us-east-1 from
+        # the previous MLflow deployment. Scoping by region avoids the collision.
+        bucket_name = f"{project_name_param.value_as_string}-artifacts-{Aws.ACCOUNT_ID}-{Aws.REGION}"
         container_repo_name = "mlflow-containers"
         cluster_name = "mlflow"
         service_name = "mlflow"
