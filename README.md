@@ -31,7 +31,8 @@ The CDK stack in [app.py](app.py) provisions the following resources:
 * **NAT instance** (`t3.nano`) providing outbound internet access for the private subnet (e.g. ECR image pulls) — a low-cost
   replacement for a managed NAT gateway.
 * **Amazon S3 bucket** — the MLflow artifact store.
-* **Amazon RDS for MySQL** (`t3.micro`, single-AZ, 20 GB) — the MLflow backend store *and* the basic-auth user/permission store.
+* **Amazon RDS for MySQL** (`t3.micro`, single-AZ, 20 GB) — hosts the MLflow tracking backend store (`mlflowdb`) and, in a
+  separate database on the same instance (`mlflow_auth`), the basic-auth user/permission store.
 * **Amazon ECS on AWS Fargate** — one task (0.25 vCPU / 1 GB) running the MLflow server container, fronted by an
   **Application Load Balancer** serving **HTTPS** (TLS terminates at the ALB; HTTP on port 80 redirects to 443). The
   container image is stored in **Amazon ECR**.
@@ -145,9 +146,11 @@ requires a username and password. It is turned on by launching the server with `
 **How it is configured:**
 * The Dockerfile generates an auth config file at container start from injected environment variables and points MLflow at it
   via `MLFLOW_AUTH_CONFIG_PATH`.
-* The auth tables (`users`, `experiment_permissions`, `registered_model_permissions`) are stored in the **same RDS database**
-  as the tracking backend, so accounts and permissions persist across Fargate task restarts. (The MLflow default of a local
-  SQLite auth DB would be lost on every restart.)
+* The auth tables (`users`, `experiment_permissions`, `registered_model_permissions`) are stored in a **separate database
+  (`mlflow_auth`) on the same RDS instance** — created by the container at startup. Auth needs its own database because both
+  the auth store and the tracking store run Alembic migrations against the default `alembic_version` table and would collide
+  if they shared one. Keeping it on the same instance means accounts/permissions still persist across Fargate task restarts
+  (the MLflow default of a local SQLite auth DB would be lost on every restart).
 * An admin account is created automatically on first start. The username is `admin` (set via `ADMIN_USERNAME` in `app.py`) and
   the **initial admin password reuses the auto-generated `dbPassword` secret** in AWS Secrets Manager.
 
