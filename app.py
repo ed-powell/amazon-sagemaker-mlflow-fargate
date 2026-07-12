@@ -227,6 +227,9 @@ class MLflowStack(Stack):
             protocol=elbv2.ApplicationProtocol.HTTPS,
             certificate=certificate,
             redirect_http=True,
+            # Give the container time to boot (first-run DB migrations on the
+            # 0.25 vCPU task) before ECS starts acting on ALB health checks.
+            health_check_grace_period=Duration.seconds(180),
         )
 
         # MLflow runs behind basic-auth and returns HTTP 401 until credentials

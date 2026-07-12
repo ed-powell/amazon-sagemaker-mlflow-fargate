@@ -25,4 +25,6 @@ CMD printf '%s\n' \
     --port 5000 \
     --default-artifact-root ${BUCKET} \
     --backend-store-uri mysql+pymysql://${USERNAME}:${PASSWORD}@${HOST}:${PORT}/${DATABASE} \
-    --app-name basic-auth
+    --app-name basic-auth \
+    --workers 1 \
+    --gunicorn-opts "--timeout 180"
