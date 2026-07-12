@@ -230,6 +230,9 @@ class MLflowStack(Stack):
             # Give the container time to boot (first-run DB migrations on the
             # 0.25 vCPU task) before ECS starts acting on ALB health checks.
             health_check_grace_period=Duration.seconds(180),
+            # Fail (and roll back) a stuck/crash-looping deployment in minutes
+            # instead of retrying indefinitely until the CloudFormation timeout.
+            circuit_breaker=ecs.DeploymentCircuitBreaker(rollback=True),
         )
 
         # MLflow runs behind basic-auth and returns HTTP 401 until credentials
