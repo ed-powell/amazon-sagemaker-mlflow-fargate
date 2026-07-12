@@ -34,4 +34,4 @@ CMD python -c "import os, pymysql; c=pymysql.connect(host=os.environ['HOST'], po
     --backend-store-uri mysql+pymysql://${USERNAME}:${PASSWORD}@${HOST}:${PORT}/${DATABASE} \
     --app-name basic-auth \
     --workers 1 \
-    --gunicorn-opts "--timeout 180"
+    --gunicorn-opts "--timeout 180 --capture-output --log-level debug"
