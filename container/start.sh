@@ -10,10 +10,11 @@ set -euo pipefail
 # share one DB). The first connection (master user) works via the RSA path.
 python - <<'PY'
 import os, pymysql
+from sqlalchemy import create_engine, text
 pw = os.environ["PASSWORD"]
 db = os.environ["DATABASE"]
-conn = pymysql.connect(host=os.environ["HOST"], port=int(os.environ["PORT"]),
-                       user=os.environ["USERNAME"], password=pw)
+host = os.environ["HOST"]; port = int(os.environ["PORT"])
+conn = pymysql.connect(host=host, port=port, user=os.environ["USERNAME"], password=pw)
 cur = conn.cursor()
 for stmt in [
     "CREATE DATABASE IF NOT EXISTS mlflow_auth",
@@ -24,12 +25,39 @@ for stmt in [
     "FLUSH PRIVILEGES",
 ]:
     cur.execute(stmt)
-conn.commit(); conn.close()
-print("startup: ensured mlflow_auth database + mlflowapp (native_password) user")
+conn.commit()
+cur.execute("SELECT user, host, plugin FROM mysql.user WHERE user='mlflowapp'")
+print("DIAG mlflowapp accounts:", cur.fetchall())
+print("DIAG password length:", len(pw))
+conn.close()
+
+# (A) direct pymysql as mlflowapp, no database
+try:
+    c = pymysql.connect(host=host, port=port, user="mlflowapp", password=pw); c.close()
+    print("DIAG (A) direct pymysql mlflowapp (no db): OK")
+except Exception as e:
+    print("DIAG (A) direct pymysql mlflowapp (no db) FAILED:", repr(e)[:140])
+
+# (B) direct pymysql as mlflowapp, with database
+try:
+    c = pymysql.connect(host=host, port=port, user="mlflowapp", password=pw, database="mlflow_auth"); c.close()
+    print("DIAG (B) direct pymysql mlflowapp (mlflow_auth): OK")
+except Exception as e:
+    print("DIAG (B) direct pymysql mlflowapp (mlflow_auth) FAILED:", repr(e)[:140])
+
+# (C) SQLAlchemy as mlflowapp (the failing path)
+try:
+    e = create_engine(f"mysql+pymysql://mlflowapp:{pw}@{host}:{port}/mlflow_auth")
+    with e.connect() as cx: cx.execute(text("SELECT 1"))
+    print("DIAG (C) SQLAlchemy mlflowapp: OK")
+except Exception as ex:
+    print("DIAG (C) SQLAlchemy mlflowapp FAILED:", repr(ex)[:140])
 PY
 
+# Connect the stores as the native_password app user, not the master user.
 DB_USER=mlflowapp
 
+# Generate the basic-auth config (configparser does no env-var substitution).
 cat > /mlflow/auth.ini <<EOF
 [mlflow]
 default_permission = READ
@@ -40,6 +68,8 @@ authorization_function = mlflow.server.auth:authenticate_request_basic_auth
 EOF
 export MLFLOW_AUTH_CONFIG_PATH=/mlflow/auth.ini
 
+# Initialize the auth store up front so any error is visible in CloudWatch
+# (gunicorn swallows the worker-boot traceback).
 python - <<'PY'
 import sys, traceback
 from mlflow.server.auth.config import read_auth_config
