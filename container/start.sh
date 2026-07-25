@@ -57,13 +57,20 @@ PY
 # Connect the stores as the native_password app user, not the master user.
 DB_USER=mlflowapp
 
-# Generate the basic-auth config (configparser does no env-var substitution).
+# MLflow reads auth.ini with configparser, which does %-interpolation on values.
+# If the password contains '%' it gets corrupted (yielding a wrong password and
+# a 1045 "Access denied"), so escape '%' as '%%' -- configparser turns it back
+# into a single '%'. (The tracking store's URI is on the command line below and
+# is not read through configparser, so it needs no escaping.)
+PW_INI="${PASSWORD//%/%%}"
+ADMIN_PW_INI="${ADMIN_PASSWORD//%/%%}"
+
 cat > /mlflow/auth.ini <<EOF
 [mlflow]
 default_permission = READ
-database_uri = mysql+pymysql://${DB_USER}:${PASSWORD}@${HOST}:${PORT}/mlflow_auth
+database_uri = mysql+pymysql://${DB_USER}:${PW_INI}@${HOST}:${PORT}/mlflow_auth
 admin_username = ${ADMIN_USERNAME}
-admin_password = ${ADMIN_PASSWORD}
+admin_password = ${ADMIN_PW_INI}
 authorization_function = mlflow.server.auth:authenticate_request_basic_auth
 EOF
 export MLFLOW_AUTH_CONFIG_PATH=/mlflow/auth.ini
@@ -71,10 +78,14 @@ export MLFLOW_AUTH_CONFIG_PATH=/mlflow/auth.ini
 # Initialize the auth store up front so any error is visible in CloudWatch
 # (gunicorn swallows the worker-boot traceback).
 python - <<'PY'
-import sys, traceback
+import os, sys, traceback
+from sqlalchemy.engine import make_url
 from mlflow.server.auth.config import read_auth_config
 from mlflow.server.auth.sqlalchemy_store import SqlAlchemyStore
 cfg = read_auth_config()
+raw = os.environ["PASSWORD"]
+parsed = make_url(cfg.database_uri).password
+print(f"DIAG configparser pw: env_len={len(raw)} parsed_len={len(parsed)} match={parsed == raw}")
 try:
     SqlAlchemyStore().init_db(cfg.database_uri)
     print("startup: auth store init_db OK")
