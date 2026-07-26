@@ -33,10 +33,36 @@ for stmt in [
 ]:
     cur.execute(stmt)
 conn.commit()
+cur.execute("SELECT user, host, plugin FROM mysql.user WHERE user='mlflowapp'")
+print("DIAG mlflowapp:", cur.fetchall(), "app_pw_len:", len(app_pw))
 conn.close()
 with open("/mlflow/app_pw", "w") as f:
     f.write(app_pw)
 print("startup: ensured mlflow_auth database + mlflowapp (native_password) user")
+
+url = f"mysql+pymysql://mlflowapp:{app_pw}@{os.environ['HOST']}:{os.environ['PORT']}/mlflow_auth"
+# (1) direct pymysql as mlflowapp
+try:
+    c = pymysql.connect(host=os.environ["HOST"], port=int(os.environ["PORT"]),
+                        user="mlflowapp", password=app_pw, database="mlflow_auth"); c.close()
+    print("DIAG (1) direct pymysql mlflowapp: OK")
+except Exception as e:
+    print("DIAG (1) direct pymysql mlflowapp FAILED:", repr(e)[:150])
+# (2) plain SQLAlchemy create_engine + connect
+try:
+    from sqlalchemy import create_engine, text
+    e = create_engine(url)
+    with e.connect() as cx: cx.execute(text("SELECT 1"))
+    print("DIAG (2) plain create_engine mlflowapp: OK")
+except Exception as ex:
+    print("DIAG (2) plain create_engine mlflowapp FAILED:", repr(ex)[:150])
+# (3) MLflow's own engine helper (the exact failing path)
+try:
+    from mlflow.store.db.utils import create_sqlalchemy_engine_with_retry
+    create_sqlalchemy_engine_with_retry(url)
+    print("DIAG (3) create_sqlalchemy_engine_with_retry mlflowapp: OK")
+except Exception as ex:
+    print("DIAG (3) create_sqlalchemy_engine_with_retry FAILED:", repr(ex)[:150])
 PY
 
 APP_PW="$(cat /mlflow/app_pw)"
