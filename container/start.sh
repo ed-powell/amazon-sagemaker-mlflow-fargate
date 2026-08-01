@@ -86,9 +86,16 @@ export MLFLOW_AUTH_CONFIG_PATH=/mlflow/auth.ini
 # (gunicorn swallows the worker-boot traceback).
 python - <<'PY'
 import sys, traceback
+from sqlalchemy.engine import make_url
 from mlflow.server.auth.config import read_auth_config
 from mlflow.server.auth.sqlalchemy_store import SqlAlchemyStore
 cfg = read_auth_config()
+app_pw = open("/mlflow/app_pw").read()
+u = make_url(cfg.database_uri)
+cpw = u.password or ""
+print(f"DIAG cfg uri: user={u.username} host={u.host} port={u.port} db={u.database} drv={u.drivername}")
+print(f"DIAG cfg pw len={len(cpw)} first2={cpw[:2]} last2={cpw[-2:]} | "
+      f"app_pw len={len(app_pw)} first2={app_pw[:2]} last2={app_pw[-2:]} match={cpw == app_pw}")
 try:
     SqlAlchemyStore().init_db(cfg.database_uri)
     print("startup: auth store init_db OK")
