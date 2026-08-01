@@ -87,44 +87,39 @@ export MLFLOW_AUTH_CONFIG_PATH=/mlflow/auth.ini
 export PYTHONUNBUFFERED=1
 python - <<'PY'
 import sys, traceback
-from sqlalchemy import engine_from_config
-from sqlalchemy.engine import make_url
+from sqlalchemy import create_engine, text
+from alembic.script import ScriptDirectory
 from mlflow.server.auth.config import read_auth_config
 from mlflow.server.auth.sqlalchemy_store import SqlAlchemyStore
+from mlflow.server.auth.db.models import Base
 from mlflow.server.auth.db.utils import _get_alembic_config
-from mlflow.store.db.utils import create_sqlalchemy_engine_with_retry
 
 cfg = read_auth_config()
-app_pw = open("/mlflow/app_pw").read()
-
-def pwlen(u):
-    try:
-        return len(make_url(u).password or "")
-    except Exception as e:
-        return "parse-err:%r" % e
-
-# Reproduce the exact Alembic path that fails: engine.url -> render_as_string ->
-# alembic config -> get_section -> engine_from_config -> connect.
-eng = create_sqlalchemy_engine_with_retry(cfg.database_uri)
-rendered = eng.url.render_as_string(hide_password=False)
-acfg = _get_alembic_config(rendered)
-section = acfg.get_section(acfg.config_ini_section, {})
-sec_url = section.get("sqlalchemy.url", "<none>")
-print("DIAG app_pw_len=%d  rendered_pwlen=%s pct_in_rendered=%s  section_pwlen=%s pct_in_section=%s"
-      % (len(app_pw), pwlen(rendered), "%" in rendered, pwlen(sec_url), "%" in sec_url), flush=True)
 try:
-    e2 = engine_from_config(section, prefix="sqlalchemy.")
-    with e2.connect():
-        pass
-    print("DIAG alembic-style engine_from_config: OK", flush=True)
-except Exception as ex:
-    print("DIAG alembic-style engine_from_config FAILED: %r" % (ex,), flush=True)
+    # MLflow's auth migration (migrate_if_needed -> upgrade -> env.py) builds a
+    # fresh NullPool engine that fails to authenticate to this RDS (1045), even
+    # though every pooled connection we make succeeds. Work around it by
+    # pre-creating the auth schema from the ORM models and stamping the
+    # alembic_version table to head, so migrate_if_needed sees the DB already at
+    # head and SKIPS the upgrade. The store's own pooled engine (used right after
+    # for creating the admin user) connects normally.
+    eng = create_engine(cfg.database_uri)
+    Base.metadata.create_all(eng)
+    head = ScriptDirectory.from_config(_get_alembic_config(cfg.database_uri)).get_current_head()
+    with eng.begin() as conn:
+        conn.execute(text(
+            "CREATE TABLE IF NOT EXISTS alembic_version "
+            "(version_num VARCHAR(32) NOT NULL, PRIMARY KEY (version_num))"
+        ))
+        if conn.execute(text("SELECT COUNT(*) FROM alembic_version")).scalar() == 0:
+            conn.execute(text("INSERT INTO alembic_version (version_num) VALUES (:v)"), {"v": head})
+    eng.dispose()
+    print("startup: pre-created auth schema, stamped alembic to %s" % head, flush=True)
 
-try:
     SqlAlchemyStore().init_db(cfg.database_uri)
     print("startup: auth store init_db OK", flush=True)
 except Exception:
-    print("startup: auth store init_db FAILED:", flush=True)
+    print("startup: auth store init FAILED:", flush=True)
     traceback.print_exc()
     sys.stdout.flush()
     sys.exit(1)
