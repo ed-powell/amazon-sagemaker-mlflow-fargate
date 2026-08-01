@@ -84,24 +84,49 @@ export MLFLOW_AUTH_CONFIG_PATH=/mlflow/auth.ini
 
 # Initialize the auth store up front so any error is visible in CloudWatch
 # (gunicorn swallows the worker-boot traceback).
+export PYTHONUNBUFFERED=1
 python - <<'PY'
 import sys, traceback
+from sqlalchemy import engine_from_config
 from sqlalchemy.engine import make_url
 from mlflow.server.auth.config import read_auth_config
 from mlflow.server.auth.sqlalchemy_store import SqlAlchemyStore
+from mlflow.server.auth.db.utils import _get_alembic_config
+from mlflow.store.db.utils import create_sqlalchemy_engine_with_retry
+
 cfg = read_auth_config()
 app_pw = open("/mlflow/app_pw").read()
-u = make_url(cfg.database_uri)
-cpw = u.password or ""
-print(f"DIAG cfg uri: user={u.username} host={u.host} port={u.port} db={u.database} drv={u.drivername}")
-print(f"DIAG cfg pw len={len(cpw)} first2={cpw[:2]} last2={cpw[-2:]} | "
-      f"app_pw len={len(app_pw)} first2={app_pw[:2]} last2={app_pw[-2:]} match={cpw == app_pw}")
+
+def pwlen(u):
+    try:
+        return len(make_url(u).password or "")
+    except Exception as e:
+        return "parse-err:%r" % e
+
+# Reproduce the exact Alembic path that fails: engine.url -> render_as_string ->
+# alembic config -> get_section -> engine_from_config -> connect.
+eng = create_sqlalchemy_engine_with_retry(cfg.database_uri)
+rendered = eng.url.render_as_string(hide_password=False)
+acfg = _get_alembic_config(rendered)
+section = acfg.get_section(acfg.config_ini_section, {})
+sec_url = section.get("sqlalchemy.url", "<none>")
+print("DIAG app_pw_len=%d  rendered_pwlen=%s pct_in_rendered=%s  section_pwlen=%s pct_in_section=%s"
+      % (len(app_pw), pwlen(rendered), "%" in rendered, pwlen(sec_url), "%" in sec_url), flush=True)
+try:
+    e2 = engine_from_config(section, prefix="sqlalchemy.")
+    with e2.connect():
+        pass
+    print("DIAG alembic-style engine_from_config: OK", flush=True)
+except Exception as ex:
+    print("DIAG alembic-style engine_from_config FAILED: %r" % (ex,), flush=True)
+
 try:
     SqlAlchemyStore().init_db(cfg.database_uri)
-    print("startup: auth store init_db OK")
+    print("startup: auth store init_db OK", flush=True)
 except Exception:
-    print("startup: auth store init_db FAILED:", file=sys.stderr)
+    print("startup: auth store init_db FAILED:", flush=True)
     traceback.print_exc()
+    sys.stdout.flush()
     sys.exit(1)
 PY
 
