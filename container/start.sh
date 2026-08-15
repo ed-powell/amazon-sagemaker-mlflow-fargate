@@ -46,9 +46,15 @@ DB_USER=mlflowapp
 # configparser -- escape '%' as '%%' so a '%' in the secret survives.
 ADMIN_PW_INI="${ADMIN_PASSWORD//%/%%}"
 
+# default_permission is what a user gets on an experiment/model they have no
+# explicit grant for. NO_PERMISSIONS (not READ) because MLflow leaves user
+# creation unauthenticated -- see UNPROTECTED_ROUTES in mlflow/server/auth --
+# so an account by itself must convey no access. Admins bypass these checks
+# entirely, and creating an experiment grants its creator MANAGE on it, so
+# ordinary use is unaffected; sharing is an explicit per-resource grant.
 cat > /mlflow/auth.ini <<EOF
 [mlflow]
-default_permission = READ
+default_permission = NO_PERMISSIONS
 database_uri = mysql+pymysql://${DB_USER}:${APP_PW}@${HOST}:${PORT}/mlflow_auth
 admin_username = ${ADMIN_USERNAME}
 admin_password = ${ADMIN_PW_INI}

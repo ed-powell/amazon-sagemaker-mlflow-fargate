@@ -1,6 +1,8 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: MIT-0
 
+import os
+
 from aws_cdk import (
     aws_ec2 as ec2,
     aws_s3 as s3,
@@ -165,8 +167,13 @@ class MLflowStack(Stack):
                 subnet_type=ec2.SubnetType.PRIVATE_ISOLATED
             ),
             # multi_az=True,
-            removal_policy=RemovalPolicy.DESTROY,
-            deletion_protection=False,
+            # The tracking database is now the system of record for real
+            # experiment history: take a final snapshot if the stack is ever
+            # deleted, and refuse an accidental delete outright. Disabling
+            # deletion_protection (and redeploying) is a deliberate prerequisite
+            # for tearing the stack down.
+            removal_policy=RemovalPolicy.SNAPSHOT,
+            deletion_protection=True,
         )
         # ==================================================
         # =============== FARGATE SERVICE ==================
@@ -241,6 +248,43 @@ class MLflowStack(Stack):
         fargate_service.target_group.configure_health_check(
             path="/health",
             healthy_http_codes="200,401",
+        )
+
+        # MLflow's basic-auth plugin leaves user creation UNAUTHENTICATED:
+        # mlflow/server/auth/__init__.py sets UNPROTECTED_ROUTES = [CREATE_USER,
+        # SIGNUP], so on an internet-facing ALB anyone could self-register. The
+        # app can't gate these itself, so block them at the load balancer.
+        #
+        # Set MLFLOW_ADMIN_CIDRS (comma-separated, e.g. "203.0.113.4/32") to let
+        # those source addresses through for account administration; with it
+        # unset, the routes are closed to everyone and users must be created
+        # from inside the VPC.
+        signup_routes = elbv2.ListenerCondition.path_patterns(
+            ["/signup", "/api/2.0/mlflow/users/create"]
+        )
+        admin_cidrs = [
+            cidr.strip()
+            for cidr in os.environ.get("MLFLOW_ADMIN_CIDRS", "").split(",")
+            if cidr.strip()
+        ]
+        if admin_cidrs:
+            # Evaluated first (lower priority number wins): an allowlisted
+            # source reaches the app normally.
+            fargate_service.listener.add_action(
+                "AllowAdminSignupRoutes",
+                priority=10,
+                conditions=[signup_routes, elbv2.ListenerCondition.source_ips(admin_cidrs)],
+                action=elbv2.ListenerAction.forward([fargate_service.target_group]),
+            )
+        fargate_service.listener.add_action(
+            "BlockPublicSignupRoutes",
+            priority=20,
+            conditions=[signup_routes],
+            action=elbv2.ListenerAction.fixed_response(
+                403,
+                content_type="text/plain",
+                message_body="Self-service account creation is disabled.",
+            ),
         )
 
         # Setup autoscaling policy
