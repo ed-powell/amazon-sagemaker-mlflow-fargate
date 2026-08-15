@@ -162,17 +162,9 @@ requires a username and password. It is turned on by launching the server with `
    ```
 2. Open the HTTPS URL (e.g. `https://mlflow.deepmm.com`), log in as `admin` with that password, and **change it immediately**
    (user menu in the UI, or the `/api/2.0/mlflow/users/update-password` endpoint).
-3. Add additional users with the Python client:
-   ```python
-   import os
-   from mlflow.server import get_app_client
-
-   os.environ["MLFLOW_TRACKING_USERNAME"] = "admin"
-   os.environ["MLFLOW_TRACKING_PASSWORD"] = "<admin password>"
-   client = get_app_client("basic-auth", tracking_uri="https://mlflow.deepmm.com")
-   client.create_user(username="alice", password="<password>")
-   ```
-   You can also use the `/signup` page in the UI or the REST endpoints under `/api/2.0/mlflow/users/...`.
+3. Add additional users by opening a shell in the running task — see
+   [Adding user accounts](#adding-user-accounts) below. `/signup` and the create-user REST endpoint are
+   deliberately blocked at the load balancer, so account creation happens from inside the VPC.
 4. Every tracking client (notebooks, CI, SageMaker) must now send credentials:
    ```
    export MLFLOW_TRACKING_URI=https://mlflow.deepmm.com
@@ -185,8 +177,49 @@ requires a username and password. It is turned on by launching the server with `
   at the Application Load Balancer using an ACM certificate, so credentials are encrypted in transit. (Traffic from the ALB
   to the container is plain HTTP but stays within the VPC.) Always connect over `https://` — the HTTP :80 listener only
   issues a redirect to HTTPS.
-* `default_permission` is set to `READ` in the Dockerfile's auth config — any authenticated user can read all experiments.
-  Change it to `NO_PERMISSIONS` if you want users isolated by default.
+* MLflow lists user creation as **unauthenticated**: `mlflow/server/auth/__init__.py` sets
+  `UNPROTECTED_ROUTES = [CREATE_USER, SIGNUP]`. On an internet-facing load balancer that would let anyone
+  self-register, so this stack blocks `/signup` and `/api/2.0/mlflow/users/create` at the ALB with a 403
+  listener rule. Set `MLFLOW_ADMIN_CIDRS` (comma-separated, e.g. `203.0.113.4/32`) before deploying to
+  allowlist source addresses for those routes; leave it unset to close them to everyone.
+* `default_permission` is `NO_PERMISSIONS`, so an account conveys no access on its own — defence in depth, in
+  case the routes above are ever reachable. Users still create and fully own their own experiments (the creator
+  is granted `MANAGE`), and admins bypass permission checks entirely. Sharing is an explicit grant.
+
+### Adding user accounts
+
+The create-user API is blocked at the load balancer, so accounts are managed from a shell inside the running
+task, where MLflow is reachable on `localhost:5000`. The service runs with ECS Exec enabled for this purpose.
+
+**One-time setup** — install the Session Manager plugin locally (`aws ecs execute-command` requires it):
+
+```bash
+curl -o /tmp/session-manager-plugin.deb \
+  "https://s3.amazonaws.com/session-manager-downloads/plugin/latest/ubuntu_64bit/session-manager-plugin.deb"
+sudo dpkg -i /tmp/session-manager-plugin.deb
+session-manager-plugin --version
+```
+
+**Open a shell** (your AWS identity needs `ecs:ExecuteCommand`):
+
+```bash
+TASK=$(aws ecs list-tasks --cluster mlflow --region us-east-2 --query 'taskArns[0]' --output text)
+aws ecs execute-command --cluster mlflow --task "$TASK" \
+  --container Container --interactive --command /bin/bash --region us-east-2
+```
+
+**Manage accounts** with the helper that ships in the image. It reads the admin credentials from the task's own
+environment and prompts for the new password, so no secret is typed into the shell:
+
+```bash
+python /mlflow/manage_users.py create alice            # --admin for an admin account
+python /mlflow/manage_users.py grant alice 3 EDIT      # permission on experiment 3
+python /mlflow/manage_users.py passwd alice
+python /mlflow/manage_users.py show alice
+python /mlflow/manage_users.py delete alice
+```
+
+Remember that a new account starts with no access to existing experiments; grant it explicitly.
 
 ### Managing an ML lifecycle with Amazon SageMaker and MLflow
 

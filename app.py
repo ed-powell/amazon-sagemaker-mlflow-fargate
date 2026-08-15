@@ -76,6 +76,23 @@ class MLflowStack(Stack):
         role.add_managed_policy(
             iam.ManagedPolicy.from_aws_managed_policy_name("AmazonECS_FullAccess")
         )
+        # ECS Exec ("aws ecs execute-command") opens an SSM channel from inside
+        # the task, which the TASK role must be allowed to create. Granted
+        # explicitly rather than relying on a managed policy to happen to
+        # include it. Required for user administration: MLflow's create-user API
+        # is blocked at the ALB, so accounts are created from a shell in the
+        # running container instead.
+        role.add_to_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "ssmmessages:CreateControlChannel",
+                    "ssmmessages:CreateDataChannel",
+                    "ssmmessages:OpenControlChannel",
+                    "ssmmessages:OpenDataChannel",
+                ],
+                resources=["*"],
+            )
+        )
 
         # ==================================================
         # ================== SECRET ========================
@@ -208,6 +225,12 @@ class MLflowStack(Stack):
                 "ADMIN_PASSWORD": ecs.Secret.from_secrets_manager(db_password_secret),
             },
             logging=ecs.LogDriver.aws_logs(stream_prefix="mlflow"),
+            # Run an init process so the SSM agent's children from ECS Exec
+            # sessions are reaped instead of accumulating as zombies (AWS's
+            # documented recommendation for exec-enabled tasks).
+            linux_parameters=ecs.LinuxParameters(
+                scope=self, id="LinuxParams", init_process_enabled=True
+            ),
         )
         port_mapping = ecs.PortMapping(
             container_port=5000, host_port=5000, protocol=ecs.Protocol.TCP
@@ -240,6 +263,11 @@ class MLflowStack(Stack):
             # Fail (and roll back) a stuck/crash-looping deployment in minutes
             # instead of retrying indefinitely until the CloudFormation timeout.
             circuit_breaker=ecs.DeploymentCircuitBreaker(rollback=True),
+            # Allow "aws ecs execute-command" into the running task. This is the
+            # supported path for creating MLflow accounts: the create-user API is
+            # unauthenticated and therefore blocked at the ALB (below), but it is
+            # reachable on localhost:5000 from inside the container.
+            enable_execute_command=True,
         )
 
         # MLflow runs behind basic-auth and returns HTTP 401 until credentials

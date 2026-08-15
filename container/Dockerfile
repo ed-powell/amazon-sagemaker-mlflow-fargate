@@ -13,6 +13,9 @@ RUN pip install \
 COPY start.sh /mlflow/start.sh
 RUN chmod +x /mlflow/start.sh
 
+# Account administration, run from an ECS Exec shell (see README).
+COPY manage_users.py /mlflow/manage_users.py
+
 EXPOSE 5000
 
 CMD ["/mlflow/start.sh"]
